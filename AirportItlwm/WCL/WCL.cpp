@@ -264,14 +264,17 @@ void AirportItlwmSkywalkInterface::publishWCLBeacon(const ieee80211_node *node, 
     metadata->capability = node->ni_capinfo;
     metadata->flags = AirportWCL::SSIDPresent | AirportWCL::RSSIValid;
     memcpy(metadata + 1, ies, length);
+    metadata->ieLength = uint32_t(AirportWCL::selectWPA2TransitionMode(
+        reinterpret_cast<uint8_t *>(metadata + 1), length));
+    size_t messageSize = sizeof(*metadata) + metadata->ieLength;
     if (assocNotified && IEEE80211_ADDR_EQ(node->ni_bssid, joinBSSID)) {
-        wclBssValid = size <= sizeof(wclBssInfo);
+        wclBssValid = messageSize <= sizeof(wclBssInfo);
         if (wclBssValid) {
             bzero(wclBssInfo, sizeof(wclBssInfo));
-            memcpy(wclBssInfo, metadata, size);
+            memcpy(wclBssInfo, metadata, messageSize);
         }
     }
-    instance->postMessage(this, AirportWCL::ScanResult, metadata, size, true);
+    instance->postMessage(this, AirportWCL::ScanResult, metadata, messageSize, true);
     IOFree(metadata, size);
 }
 

@@ -220,6 +220,74 @@ inline bool validIEs(const uint8_t *data, size_t length) {
 inline bool scanUsesProbes(bool requested, bool activeRequest) {
     return requested ? activeRequest : true;
 }
+
+// Present the supported PSK option of a PSK/SAE transition network to WCL.
+// This operates on the scan-message copy, never the received beacon or the
+// net80211 RSN IE used to validate the four-way handshake. SAE-only, mandatory
+// PMF and other AKM combinations must not be converted into WPA2 networks.
+inline size_t selectWPA2TransitionMode(uint8_t *ies, size_t length) {
+    if (!validIEs(ies, length))
+        return length;
+    for (size_t offset = 0; offset < length; ) {
+        uint8_t *ie = ies + offset;
+        size_t size = size_t(ie[1]) + 2;
+        if (ie[0] != 48 || size < 10 || read16(ie + 2) != 1) {
+            offset += size;
+            continue;
+        }
+        size_t pairwiseCount = read16(ie + 8);
+        if (!pairwiseCount || pairwiseCount > (size - 10) / 4) {
+            offset += size;
+            continue;
+        }
+        size_t countOffset = 10 + 4 * pairwiseCount;
+        if (size - countOffset < 2) {
+            offset += size;
+            continue;
+        }
+        size_t count = read16(ie + countOffset);
+        size_t suitesOffset = countOffset + 2;
+        if (count < 2 || count > (size - suitesOffset) / 4) {
+            offset += size;
+            continue;
+        }
+        size_t tailOffset = suitesOffset + 4 * count;
+        // PSK/SAE transition mode advertises PMF capable, but not required.
+        if (size - tailOffset < 2 || (read16(ie + tailOffset) & 0xc0) != 0x80) {
+            offset += size;
+            continue;
+        }
+        bool psk = false, sae = false, other = false;
+        for (size_t i = 0; i < count; ++i) {
+            const uint8_t *suite = ie + suitesOffset + 4 * i;
+            if (suite[0] != 0 || suite[1] != 0x0f || suite[2] != 0xac)
+                other = true;
+            else if (suite[3] == 2)
+                psk = true;
+            else if (suite[3] == 8)
+                sae = true;
+            else
+                other = true;
+        }
+        if (!psk || !sae || other) {
+            offset += size;
+            continue;
+        }
+        const uint8_t pskSuite[] = {0, 0x0f, 0xac, 2};
+        memcpy(ie + suitesOffset, pskSuite, sizeof(pskSuite));
+        ie[countOffset] = 1;
+        ie[countOffset + 1] = 0;
+        size_t removed = 4 * (count - 1);
+        // Keep RSN capabilities, PMKIDs, group-management cipher and all
+        // following information elements byte-for-byte intact.
+        memmove(ie + suitesOffset + 4, ie + tailOffset,
+                length - offset - tailOffset);
+        ie[1] -= removed;
+        length -= removed;
+        offset += size - removed;
+    }
+    return length;
+}
 inline bool probeChannel(bool active, bool passiveOnly, bool dfs) {
     return active && !passiveOnly && !dfs;
 }

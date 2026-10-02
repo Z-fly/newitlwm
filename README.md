@@ -25,6 +25,11 @@ hardware validation; compilation is not evidence of working Wi-Fi on every card.
 HE/MLO extended BSS reporting, WPA3-only authentication, AWDL, and wake-on-wireless
 are not advertised as implemented by this integration.
 
+WPA2/WPA3-Personal transition networks with optional PMF are presented to WCL
+using their advertised WPA2-PSK option. The original received RSN IE is retained
+by net80211 for handshake validation. This does not implement SAE or enable
+connections to WPA3-only networks or networks requiring PMF.
+
 Build with Xcode and MacKernelSDK at commit
 `3f750085caa17ec3a7880f11c11bf4f48cd6a164` checked out in `MacKernelSDK`:
 
