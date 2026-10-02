@@ -446,6 +446,8 @@ struct ieee80211com {
     bool ic_wcl_scan_active;
     uint8_t ic_wcl_scan_ssid_length;
     uint8_t ic_wcl_scan_ssid[32];
+    bool ic_wcl_scan_restricted;
+    uint8_t ic_wcl_scan_channels[32];
 #endif
     void            (*ic_event_handler)(struct ieee80211com *, int, void *);
 	CTimeout*		ic_bgscan_timeout;

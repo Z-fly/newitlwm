@@ -7390,6 +7390,12 @@ iwx_umac_scan_fill_channels(struct iwx_softc *sc,
         
         if (c->ic_flags == 0)
             continue;
+#ifdef AIRPORT_WCL
+        if (!AirportWCL::scanChannelSelected(ic->ic_wcl_scan_channels,
+                ic->ic_wcl_scan_requested && ic->ic_wcl_scan_restricted,
+                ieee80211_chan2ieee(ic, c)))
+            continue;
+#endif
         
         channel_num = ieee80211_mhz2ieee(c->ic_freq, 0);
         if (isset(sc->sc_ucode_api,
@@ -10301,6 +10307,21 @@ iwx_init(struct _ifnet *ifp)
      * ieee80211_begin_scan() ends up scheduling iwx_newstate_task().
      * Wait until the transition to SCAN state has completed.
      */
+#ifdef AIRPORT_WCL
+    // The state task may finish before msleep begins, so wakeup alone is not
+    // evidence of completion. Recheck the predicate even when sleep times out.
+    while (ic->ic_state != IEEE80211_S_SCAN) {
+        err = tsleep_nsec(&ic->ic_state, PCATCH, "iwxinit", SEC_TO_NSEC(1));
+        if (generation != sc->sc_generation)
+            return ENXIO;
+        if (err && ic->ic_state != IEEE80211_S_SCAN) {
+            iwx_stop(ifp);
+            return err;
+        }
+    }
+    if (generation != sc->sc_generation)
+        return ENXIO;
+#else
     do {
         err = tsleep_nsec(&ic->ic_state, PCATCH, "iwxinit",
             SEC_TO_NSEC(1));
@@ -10311,6 +10332,7 @@ iwx_init(struct _ifnet *ifp)
             return err;
         }
     } while (ic->ic_state != IEEE80211_S_SCAN);
+#endif
     
 #ifdef AIRPORT_WCL
     if (ic->ic_event_handler)

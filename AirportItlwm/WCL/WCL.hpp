@@ -299,7 +299,12 @@ struct ScanRequest {
     uint32_t ssidLength;
     uint8_t bssid[6];
     uint32_t channelCount;
+    uint8_t channels[32];
 };
+
+inline bool scanChannelSelected(const uint8_t *channels, bool restricted, unsigned channel) {
+    return !restricted || (channel < 256 && (channels[channel / 8] & (1U << (channel % 8))));
+}
 
 inline bool decodeScan(const void *buffer, size_t length, ScanRequest &out) {
     if (!buffer || length < 0x58)
@@ -317,6 +322,17 @@ inline bool decodeScan(const void *buffer, size_t length, ScanRequest &out) {
     out.channelCount = count;
     memcpy(out.ssid, p + 0x20, ssidLength);
     memcpy(out.bssid, p + 0x14, 6);
+    // Native entries are apple80211_channel: version, channel, flags (12 bytes).
+    for (uint32_t i = 0; i < count; ++i) {
+        const uint8_t *entry = p + 0x58 + size_t(i) * 12;
+        uint32_t channel = read32(entry + 4), flags = read32(entry + 8);
+        // Do not confuse 6 GHz channel numbers with overlapping 2.4 GHz ones.
+        if (!channel || channel > 196 || (flags & 0x2000))
+            continue;
+        if (((flags & 0x8) && channel > 14) || ((flags & 0x10) && channel <= 14))
+            continue;
+        out.channels[channel / 8] |= 1U << (channel % 8);
+    }
     return true;
 }
 

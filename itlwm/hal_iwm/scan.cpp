@@ -176,6 +176,12 @@ iwm_lmac_scan_fill_channels(struct iwm_softc *sc,
          c++) {
         if (c->ic_flags == 0)
             continue;
+#ifdef AIRPORT_WCL
+        if (!AirportWCL::scanChannelSelected(ic->ic_wcl_scan_channels,
+                ic->ic_wcl_scan_requested && ic->ic_wcl_scan_restricted,
+                ieee80211_chan2ieee(ic, c)))
+            continue;
+#endif
         
         chan->channel_num = htole16(ieee80211_mhz2ieee(c->ic_freq, 0));
         chan->iter_count = htole16(1);
@@ -209,6 +215,12 @@ iwm_umac_scan_fill_channels(struct iwm_softc *sc,
          c++) {
         if (c->ic_flags == 0)
             continue;
+#ifdef AIRPORT_WCL
+        if (!AirportWCL::scanChannelSelected(ic->ic_wcl_scan_channels,
+                ic->ic_wcl_scan_requested && ic->ic_wcl_scan_restricted,
+                ieee80211_chan2ieee(ic, c)))
+            continue;
+#endif
         
         chan->channel_num = ieee80211_mhz2ieee(c->ic_freq, 0);
         chan->iter_count = 1;

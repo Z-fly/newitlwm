@@ -97,6 +97,8 @@ void AirportItlwmSkywalkInterface::stopWCL()
     if (scanSource)
         scanSource->cancelTimeout();
     scanPending = joinPending = false;
+    joinDeferred = false;
+    explicit_bzero(&deferredJoin, sizeof(deferredJoin));
     if (fHalService) {
         ieee80211com *ic = fHalService->get80211Controller();
         ic->ic_wcl_join_requested = false;
@@ -191,6 +193,15 @@ IOReturn AirportItlwmSkywalkInterface::beginWCLScan(apple80211ScanRequest *reque
         return kIOReturnBusy;
     if (ic->ic_state == IEEE80211_S_AUTH || ic->ic_state == IEEE80211_S_ASSOC)
         return kIOReturnBusy;
+    if (scan.channelCount) {
+        bool usable = false;
+        for (unsigned channel = 1; channel <= IEEE80211_CHAN_MAX; ++channel)
+            if (ic->ic_channels[channel].ic_flags &&
+                AirportWCL::scanChannelSelected(scan.channels, true, channel))
+                usable = true;
+        if (!usable)
+            return kIOReturnUnsupported;
+    }
     scanPending = true;
     scanCompleted = false;
     scanSkipCompletion = ic->ic_state == IEEE80211_S_SCAN &&
@@ -200,6 +211,8 @@ IOReturn AirportItlwmSkywalkInterface::beginWCLScan(apple80211ScanRequest *reque
     ic->ic_wcl_scan_active = scan.type != 2;
     ic->ic_wcl_scan_ssid_length = scan.type == 2 ? 0 : scan.ssidLength;
     memcpy(ic->ic_wcl_scan_ssid, scan.ssid, sizeof(scan.ssid));
+    ic->ic_wcl_scan_restricted = scan.channelCount != 0;
+    memcpy(ic->ic_wcl_scan_channels, scan.channels, sizeof(scan.channels));
     scanSource->setTimeoutMS(20000);
     if (ic->ic_state == IEEE80211_S_RUN) {
         ieee80211_begin_cache_bgscan(&ic->ic_if);
@@ -351,11 +364,28 @@ IOReturn AirportItlwmSkywalkInterface::beginWCLJoin(apple80211AssocCandidates *r
     if (!AirportWCL::decodeJoin(request, 0x2cc, join)) {
         return kIOReturnBadArgument;
     }
+    return startWCLJoin(join);
+}
+
+IOReturn AirportItlwmSkywalkInterface::startWCLJoin(AirportWCL::JoinRequest &join)
+{
     auto auth = AirportWCL::classifyLegacyAuth(join);
     bool personal = auth == AirportWCL::LegacyAuth::Personal;
     bool enterprise = auth == AirportWCL::LegacyAuth::Enterprise;
     bool supported = auth != AirportWCL::LegacyAuth::Invalid;
     ieee80211com *ic = fHalService->get80211Controller();
+    // Applying a private MAC restarts firmware asynchronously. WCL can issue
+    // the association before that restart has completed; keep one request
+    // until the HAL reports READY rather than making the user retry it.
+    if (supported && !joinPending && ic->ic_wcl_mac_reconfig &&
+        (ic->ic_if.if_flags & IFF_UP)) {
+        deferredJoin = join;
+        memcpy(joinBSSID, join.bssid, sizeof(joinBSSID));
+        explicit_bzero(&join, sizeof(join));
+        joinDeferred = joinPending = true;
+        joinTimer->setTimeoutMS(30000);
+        return kIOReturnSuccess;
+    }
     if (!supported || !(ic->ic_if.if_flags & IFF_RUNNING) || joinPending || scanPending) {
         explicit_bzero(&join, sizeof(join));
         return !supported ? kIOReturnUnsupported : kIOReturnBusy;
@@ -452,6 +482,22 @@ IOReturn AirportItlwmSkywalkInterface::beginWCLJoin(apple80211AssocCandidates *r
     return kIOReturnSuccess;
 }
 
+void AirportItlwmSkywalkInterface::resumeWCLJoin()
+{
+    if (!joinDeferred || wclStopping)
+        return;
+    AirportWCL::JoinRequest join = deferredJoin;
+    explicit_bzero(&deferredJoin, sizeof(deferredJoin));
+    joinDeferred = joinPending = false;
+    joinTimer->cancelTimeout();
+    IOReturn status = startWCLJoin(join);
+    explicit_bzero(&join, sizeof(join));
+    if (status != kIOReturnSuccess) {
+        joinPending = true;
+        finishWCLJoin(1, 0, status);
+    }
+}
+
 void AirportItlwmSkywalkInterface::finishWCLJoin(uint16_t status, uint16_t reason, IOReturn driverStatus)
 {
     if (!joinPending)
@@ -462,6 +508,8 @@ void AirportItlwmSkywalkInterface::finishWCLJoin(uint16_t status, uint16_t reaso
     memcpy(event.peers[0].bssid, joinBSSID, 6);
     event.peers[0].driverStatus = driverStatus;
     joinPending = false;
+    joinDeferred = false;
+    explicit_bzero(&deferredJoin, sizeof(deferredJoin));
     joinTimer->cancelTimeout();
     instance->postMessage(this, AirportWCL::ConnectComplete, &event, sizeof(event), true);
     if (status) {
@@ -486,6 +534,8 @@ IOReturn AirportItlwmSkywalkInterface::leaveWCLNetwork()
 {
     ieee80211com *ic = fHalService->get80211Controller();
     joinPending = false;
+    joinDeferred = false;
+    explicit_bzero(&deferredJoin, sizeof(deferredJoin));
     joinTimer->cancelTimeout();
     ic->ic_wcl_join_requested = false;
     wclAssociatedBeacons = 0;
@@ -570,7 +620,8 @@ void AirportItlwmSkywalkInterface::handleWCLEvent(int code, void *data)
             // adapter reset. Replaying firmware-load events here rotates the
             // scan MAC again and recursively restarts the card.
             if (AirportWCL::consumeMacReconfiguration(ic->ic_wcl_mac_reconfig, ready)) {
-                
+                if (ready)
+                    resumeWCLJoin();
                 break;
             }
             if (ready) {
@@ -582,6 +633,8 @@ void AirportItlwmSkywalkInterface::handleWCLEvent(int code, void *data)
             event.available = ready;
             event.reason = ready ? 0xe0821803 : 0xe0821804;
             instance->postMessage(this, AirportWCL::DriverAvailable, &event, sizeof(event), true);
+            if (ready)
+                resumeWCLJoin();
             break;
         }
         case IEEE80211_EVT_BEACON: {

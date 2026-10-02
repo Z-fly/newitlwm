@@ -406,6 +406,8 @@ private:
     IOReturn installWCLKey(apple80211_key *);
     IOReturn accessWCLRSN(apple80211_rsn_ie_data *, bool);
     IOReturn beginWCLJoin(apple80211AssocCandidates *);
+    IOReturn startWCLJoin(AirportWCL::JoinRequest &);
+    void resumeWCLJoin();
     IOReturn abortWCLJoin();
     IOReturn leaveWCLNetwork();
     void finishWCLScan(IOReturn);
@@ -424,6 +426,8 @@ private:
     uint32_t wclLqmBeacons = 0;
     uint32_t wclLqmReportedBeacons = 0;
     bool joinPending;
+    bool joinDeferred = false;
+    AirportWCL::JoinRequest deferredJoin = {};
     bool assocNotified;
     bool firstBeaconNotified;
     bool portAuthorized;
