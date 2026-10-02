@@ -9,11 +9,70 @@
 #ifdef AIRPORT_WCL
 #include "../AirportItlwmV2.hpp"
 #include "../AirportItlwmSkywalkInterface.hpp"
+#include <kern/thread_call.h>
 #include <net80211/ieee80211_node.h>
 #include <net80211/ieee80211_ioctl.h>
 #include <net80211/ieee80211_priv.h>
 
 extern IOCommandGate *_fCommandGate;
+
+struct AirportItlwmSkywalkInterface::CountryUpdate {
+    AirportItlwmSkywalkInterface *interface;
+    AirportItlwm *controller;
+    IOCommandGate *gate;
+    IO80211WorkQueue *queue;
+    thread_call_t call;
+};
+
+void AirportItlwmSkywalkInterface::deferWCLCountryUpdate()
+{
+    auto queue = instance->getWorkQueue();
+    if (wclStopping || !_fCommandGate || !queue)
+        return;
+    auto update = static_cast<CountryUpdate *>(IOMalloc(sizeof(CountryUpdate)));
+    if (!update)
+        return;
+    update->call = thread_call_allocate(wclCountryUpdateThread, update);
+    if (!update->call) {
+        IOFree(update, sizeof(*update));
+        return;
+    }
+    update->interface = this;
+    update->controller = instance;
+    update->gate = _fCommandGate;
+    update->queue = queue;
+    retain();
+    instance->retain();
+    update->gate->retain();
+    queue->retain();
+    thread_call_enter(update->call);
+}
+
+void AirportItlwmSkywalkInterface::wclCountryUpdateThread(void *arg, void *)
+{
+    auto update = static_cast<CountryUpdate *>(arg);
+    // Native country notifications synchronously query WCL. Holding the gate
+    // is necessary, but executing on the driver's workloop thread is forbidden.
+    update->gate->runAction(wclCountryUpdateGated, update);
+    thread_call_free(update->call);
+    update->interface->release();
+    update->controller->release();
+    update->gate->release();
+    update->queue->release();
+    IOFree(update, sizeof(*update));
+}
+
+IOReturn AirportItlwmSkywalkInterface::wclCountryUpdateGated(
+    OSObject *, void *arg, void *, void *, void *)
+{
+    auto update = static_cast<CountryUpdate *>(arg);
+    if (update->interface->wclStopping)
+        return kIOReturnNotReady;
+    if (!update->queue->inGate() || update->queue->onThread())
+        return kIOReturnNotPermitted;
+    update->interface->postMessage(APPLE80211_M_COUNTRY_CODE_CHANGED, nullptr, 0, false);
+    return kIOReturnSuccess;
+}
 
 bool AirportItlwmSkywalkInterface::initWCL()
 {
@@ -25,6 +84,9 @@ bool AirportItlwmSkywalkInterface::initWCL()
 
 void AirportItlwmSkywalkInterface::stopWCL()
 {
+    // Pending country tasks must observe shutdown under the same gate.
+    if (_fCommandGate)
+        _fCommandGate->runAction(stopWCLGated, this);
     wclStopping = true;
     if (joinTimer) {
         joinTimer->cancelTimeout();
@@ -41,6 +103,13 @@ void AirportItlwmSkywalkInterface::stopWCL()
         ic->ic_wcl_scan_requested = false;
         explicit_bzero(ic->ic_psk, sizeof(ic->ic_psk));
     }
+}
+
+IOReturn AirportItlwmSkywalkInterface::stopWCLGated(
+    OSObject *, void *arg, void *, void *, void *)
+{
+    static_cast<AirportItlwmSkywalkInterface *>(arg)->wclStopping = true;
+    return kIOReturnSuccess;
 }
 
 void AirportItlwmSkywalkInterface::free()
@@ -471,6 +540,9 @@ void AirportItlwmSkywalkInterface::handleWCLEvent(int code, void *data)
     }
     ieee80211com *ic = fHalService->get80211Controller();
     switch (code) {
+        case IEEE80211_EVT_COUNTRY_CODE_UPDATE:
+            deferWCLCountryUpdate();
+            break;
         case IEEE80211_EVT_DRIVER_RESET_BEGIN: {
             if (ic->ic_wcl_mac_reconfig) {
                 break;

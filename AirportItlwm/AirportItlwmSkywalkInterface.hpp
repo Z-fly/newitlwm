@@ -395,6 +395,11 @@ public:
     void completeWCLScan();
 private:
     static IOReturn wclCommand(OSObject *, void *, void *, void *, void *);
+    struct CountryUpdate;
+    static void wclCountryUpdateThread(void *, void *);
+    static IOReturn wclCountryUpdateGated(OSObject *, void *, void *, void *, void *);
+    static IOReturn stopWCLGated(OSObject *, void *, void *, void *, void *);
+    void deferWCLCountryUpdate();
     static void wclJoinTimeout(OSObject *, IOTimerEventSource *);
     IOReturn beginWCLScan(apple80211ScanRequest *);
     void clearWCLPMKSA();

@@ -96,7 +96,7 @@ eventHandler(struct ieee80211com *ic, int msgCode, void *data)
         return;
 #ifdef AIRPORT_WCL
     static_cast<AirportItlwmSkywalkInterface *>(interface)->handleWCLEvent(msgCode, data);
-#endif
+#else
     switch (msgCode) {
         case IEEE80211_EVT_COUNTRY_CODE_UPDATE:
             interface->postMessage(APPLE80211_M_COUNTRY_CODE_CHANGED, NULL, 0, 0);
@@ -110,6 +110,7 @@ eventHandler(struct ieee80211com *ic, int msgCode, void *data)
         default:
             break;
     }
+#endif
 }
 
 void AirportItlwm::watchdogAction(IOTimerEventSource *timer)
@@ -1018,11 +1019,23 @@ getCOUNTRY_CODE(OSObject *object,
 IOReturn AirportItlwm::
 setCOUNTRY_CODE(OSObject *object, struct apple80211_country_code_data *data)
 {
+#ifdef AIRPORT_WCL
+    if (!data)
+        return kIOReturnBadArgument;
+    if (data->cc[0] != 'x' && data->cc[0] != 'X' &&
+        memcmp(geo_location_cc, data->cc, sizeof(geo_location_cc)) != 0) {
+        memcpy(geo_location_cc, data->cc, sizeof(geo_location_cc));
+        if (fNetIf)
+            static_cast<AirportItlwmSkywalkInterface *>(fNetIf)->handleWCLEvent(
+                IEEE80211_EVT_COUNTRY_CODE_UPDATE, nullptr);
+    }
+#else
     XYLog("%s cc=%s\n", __FUNCTION__, data->cc);
     if (data && data->cc[0] != 120 && data->cc[0] != 88) {
         memcpy(geo_location_cc, data->cc, sizeof(geo_location_cc));
         fNetIf->postMessage(APPLE80211_M_COUNTRY_CODE_CHANGED, NULL, 0, 0);
     }
+#endif
     return kIOReturnSuccess;
 }
 
