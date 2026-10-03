@@ -327,8 +327,10 @@ bool AirportItlwm::start(IOService *provider)
         fHalService->get80211Controller()->ic_userflags |= IEEE80211_F_NOHT40;
 
 #ifdef AIRPORT_WCL
-    int he_enabled = 0;
-    if (PE_parse_boot_argn("itlwm_he", &he_enabled, sizeof(he_enabled)) && he_enabled == 1)
+    /* Enable HE by default; itlwm_he=0 retains an explicit fallback. */
+    int he_enabled = 1;
+    PE_parse_boot_argn("itlwm_he", &he_enabled, sizeof(he_enabled));
+    if (he_enabled == 1)
         fHalService->get80211Controller()->ic_userflags |= IEEE80211_F_HEON;
 #endif
 
