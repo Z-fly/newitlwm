@@ -1388,8 +1388,8 @@ iwx_read_firmware(struct iwx_softc *sc)
     if (fw->fw_status == IWX_FW_STATUS_DONE)
         return 0;
     
-    while (fw->fw_status == IWX_FW_STATUS_INPROGRESS)
-        tsleep_nsec(&sc->sc_fw, 0, "iwxfwp", INFSLP);
+    if (fw->fw_status == IWX_FW_STATUS_INPROGRESS)
+        return EBUSY;
     fw->fw_status = IWX_FW_STATUS_INPROGRESS;
     
     if (fw->fw_rawdata != NULL)
@@ -2121,6 +2121,7 @@ iwx_load_pnvm(struct iwx_softc *sc)
     };
     
 out:
+    sc->sc_init_complete &= ~IWX_PNVM_COMPLETE;
     /* kick the doorbell */
     if (iwx_nic_lock(sc)) {
         iwx_write_umac_prph(sc, IWX_UREG_DOORBELL_TO_ISR6,
@@ -2128,7 +2129,9 @@ out:
         iwx_nic_unlock(sc);
     }
     
-    err = tsleep_nsec(&sc->sc_init_complete, 0, "iwxinit", SEC_TO_NSEC(2));
+    err = iwx_wait_notification(sc, &sc->sc_init_complete, IWX_PNVM_COMPLETE, 2000);
+    if (err == ENXIO)
+        return err;
     
     iwx_pnvm_free(&sc->sc_fw);
     
@@ -2661,6 +2664,14 @@ iwx_reset_tx_ring(struct iwx_softc *sc, struct iwx_tx_ring *ring)
     
     for (i = 0; i < ring->ring_count; i++) {
         struct iwx_tx_data *data = &ring->data[i];
+        if (ring->qid == IWX_DQA_CMD_QUEUE) {
+            data->flags = 0;
+            ::free(sc->sc_cmd_resp_pkt[i]);
+            sc->sc_cmd_resp_pkt[i] = NULL;
+            sc->sc_cmd_resp_len[i] = 0;
+            if (ring->desc)
+                getMainCommandGate()->commandWakeup(&ring->desc[i]);
+        }
         
         if (data->m != NULL) {
             //            bus_dmamap_sync(sc->sc_dmat, data->map, 0,
@@ -3175,6 +3186,16 @@ iwx_start_hw(struct iwx_softc *sc)
 void ItlIwx::
 iwx_stop_device(struct iwx_softc *sc)
 {
+    if (!getMainWorkLoop()->inGate()) {
+        getMainCommandGate()->runAction(
+            [](OSObject *, void *arg0, void *arg1, void *, void *) -> IOReturn {
+                ItlIwx *that = (ItlIwx *)arg0;
+                that->iwx_stop_device((struct iwx_softc *)arg1);
+                return kIOReturnSuccess;
+            }, this, sc);
+        return;
+    }
+
     XYLog("%s\n", __FUNCTION__);
     int qid;
     
@@ -3381,7 +3402,7 @@ out:
 int ItlIwx::
 iwx_tvqm_alloc_txq(struct iwx_softc *sc, int tid, int ssn)
 {
-    int queue;
+    int queue, generation = sc->sc_generation;
     //TODO: Here is a bug, for gen3 devices which support 256 frame aggregate into 1 A-MPDU like ax210, if the TfDs count larger than 256 than it would trigger system freeze on macOS, don't know why but Linux can do this. Still need to dig deep into the code or optimize the DMA memory allocation, here I just limit the size to 256 as the temporary solution.
 #ifdef notyet
     int size = sc->sc_device_family >= IWX_DEVICE_FAMILY_AX210 ? IWX_MIN_256_BA_QUEUE_SIZE_GEN3 : IWX_DEFAULT_QUEUE_SIZE;
@@ -3391,6 +3412,8 @@ iwx_tvqm_alloc_txq(struct iwx_softc *sc, int tid, int ssn)
     
     do {
         queue = iwx_tvqm_enable_txq(sc, tid, ssn, size);
+        if (generation != sc->sc_generation)
+            return -ENXIO;
         if (queue < 0)
             XYLog("Failed allocating TXQ of size %d for sta %d tid %d, ret: %d\n",
                   size, IWX_STATION_ID, tid, queue);
@@ -3427,6 +3450,7 @@ iwx_tvqm_enable_txq(struct iwx_softc *sc, int tid, int ssn, uint32_t size)
     struct iwx_tx_ring *ring = &sc->sc_tvqm_ring;
     
     memset(ring, 0, sizeof(*ring));
+    ring->qid = IWX_INVALID_QUEUE;
     iwx_tx_ring_init(sc, ring, size);
     /* Allocate TX descriptors (256-byte aligned). */
     err = iwx_dma_contig_alloc(sc->sc_dmat, &ring->desc_dma, ring->ring_count * sizeof (struct iwx_tfh_tfd), 256);
@@ -3482,8 +3506,10 @@ iwx_tvqm_enable_txq(struct iwx_softc *sc, int tid, int ssn, uint32_t size)
     hcmd.len[0] = sizeof(cmd);
 
     err = iwx_send_cmd(sc, &hcmd);
-    if (err)
-        return err;
+    if (err) {
+        err = -err;
+        goto fail;
+    }
 
     pkt = hcmd.resp_pkt;
     if (!pkt || (pkt->hdr.group_id & IWX_CMD_FAILED_MSK)) {
@@ -3512,8 +3538,10 @@ iwx_tvqm_enable_txq(struct iwx_softc *sc, int tid, int ssn, uint32_t size)
     iwx_reset_tx_ring(sc, &sc->txq[fwqid]);
     iwx_free_tx_ring(sc, &sc->txq[fwqid]);
     memcpy(&sc->txq[fwqid], ring, sizeof(*ring));
+    iwx_free_resp(sc, &hcmd);
     return fwqid;
 fail:
+    iwx_free_resp(sc, &hcmd);
     iwx_reset_tx_ring(sc, ring);
     iwx_free_tx_ring(sc, ring);
     return err;
@@ -4108,7 +4136,7 @@ iwx_setup_he_rates(struct iwx_softc *sc)
 
 #define IWX_MAX_RX_BA_SESSIONS 16
 
-void ItlIwx::
+int ItlIwx::
 iwx_sta_rx_agg(struct iwx_softc *sc, struct ieee80211_node *ni, uint8_t tid,
                uint16_t ssn, uint16_t winsize, int timeout_val, int start)
 {
@@ -4116,7 +4144,7 @@ iwx_sta_rx_agg(struct iwx_softc *sc, struct ieee80211_node *ni, uint8_t tid,
     struct ieee80211com *ic = &sc->sc_ic;
     struct iwx_add_sta_cmd cmd;
     struct iwx_node *in = (struct iwx_node *)ni;
-    int err, s;
+    int err, s, generation = sc->sc_generation;
     uint32_t status;
     struct iwx_rxba_data *rxba = NULL;
     uint8_t baid = 0;
@@ -4126,7 +4154,7 @@ iwx_sta_rx_agg(struct iwx_softc *sc, struct ieee80211_node *ni, uint8_t tid,
     if (start && sc->sc_rx_ba_sessions >= IWX_MAX_RX_BA_SESSIONS) {
         ieee80211_addba_req_refuse(ic, ni, tid);
         splx(s);
-        return;
+        return ENOSPC;
     }
     
     memset(&cmd, 0, sizeof(cmd));
@@ -4150,11 +4178,15 @@ iwx_sta_rx_agg(struct iwx_softc *sc, struct ieee80211_node *ni, uint8_t tid,
     err = iwx_send_cmd_pdu_status(sc, IWX_ADD_STA, sizeof(cmd), &cmd,
                                   &status);
     
+    if (generation != sc->sc_generation) {
+        splx(s);
+        return ENXIO;
+    }
     if (err || (status & IWX_ADD_STA_STATUS_MASK) != IWX_ADD_STA_SUCCESS) {
         if (start)
             ieee80211_addba_req_refuse(ic, ni, tid);
         splx(s);
-        return;
+        return err ? err : EIO;
     }
     
     /* Deaggregation is done in hardware. */
@@ -4162,7 +4194,7 @@ iwx_sta_rx_agg(struct iwx_softc *sc, struct ieee80211_node *ni, uint8_t tid,
         if (!(status & IWX_ADD_STA_BAID_VALID_MASK)) {
             ieee80211_addba_req_refuse(ic, ni, tid);
             splx(s);
-            return;
+            return EIO;
         }
         baid = (status & IWX_ADD_STA_BAID_MASK) >>
         IWX_ADD_STA_BAID_SHIFT;
@@ -4170,13 +4202,13 @@ iwx_sta_rx_agg(struct iwx_softc *sc, struct ieee80211_node *ni, uint8_t tid,
             baid >= nitems(sc->sc_rxba_data)) {
             ieee80211_addba_req_refuse(ic, ni, tid);
             splx(s);
-            return;
+            return EIO;
         }
         rxba = &sc->sc_rxba_data[baid];
         if (rxba->baid != IWX_RX_REORDER_DATA_INVALID_BAID) {
             ieee80211_addba_req_refuse(ic, ni, tid);
             splx(s);
-            return;
+            return EIO;
         }
         rxba->sta_id = IWX_STATION_ID;
         rxba->tid = tid;
@@ -4214,14 +4246,24 @@ iwx_sta_rx_agg(struct iwx_softc *sc, struct ieee80211_node *ni, uint8_t tid,
         sc->sc_rx_ba_sessions--;
 
     splx(s);
+    return 0;
 }
 
 void ItlIwx::
 iwx_mac_ctxt_task(void *arg)
 {
     struct iwx_softc *sc = (struct iwx_softc *)arg;
-    struct ieee80211com *ic = &sc->sc_ic;
     ItlIwx *that = container_of(sc, ItlIwx, com);
+    if (!that->getMainWorkLoop()->inGate()) {
+        that->getMainCommandGate()->runAction(
+            [](OSObject *, void *arg0, void *, void *, void *) -> IOReturn {
+                iwx_mac_ctxt_task(arg0);
+                return kIOReturnSuccess;
+            }, arg);
+        return;
+    }
+    struct ieee80211com *ic = &sc->sc_ic;
+
     struct iwx_node *in = (struct iwx_node *)ic->ic_bss;
     int err, s = splnet();
     
@@ -4234,11 +4276,17 @@ iwx_mac_ctxt_task(void *arg)
     }
     
     err = that->iwx_config_he_sta(sc, &in->in_ni);
-    if (err)
+    if (err) {
         XYLog("HE context update failed: %d\n", err);
+        splx(s);
+        return;
+    }
     err = that->iwx_mac_ctxt_cmd(sc, in, IWX_FW_CTXT_ACTION_MODIFY, 1);
-    if (err)
+    if (err) {
         printf("%s: failed to update MAC\n", DEVNAME(sc));
+        splx(s);
+        return;
+    }
     
     if (!isset(sc->sc_enabled_capa, IWX_UCODE_TLV_CAPA_SESSION_PROT_CMD))
         that->iwx_unprotect_session(sc, in);
@@ -4251,8 +4299,17 @@ void ItlIwx::
 iwx_chan_ctxt_task(void *arg)
 {
     struct iwx_softc *sc = (struct iwx_softc *)arg;
-    struct ieee80211com *ic = &sc->sc_ic;
     ItlIwx *that = container_of(sc, ItlIwx, com);
+    if (!that->getMainWorkLoop()->inGate()) {
+        that->getMainCommandGate()->runAction(
+            [](OSObject *, void *arg0, void *, void *, void *) -> IOReturn {
+                iwx_chan_ctxt_task(arg0);
+                return kIOReturnSuccess;
+            }, arg);
+        return;
+    }
+    struct ieee80211com *ic = &sc->sc_ic;
+
     struct iwx_node *in = (struct iwx_node *)ic->ic_bss;
     int chains = that->iwx_mimo_enabled(sc) ? 2 : 1;
     int err, s = splnet();
@@ -4345,39 +4402,60 @@ void ItlIwx::
 iwx_ba_task(void *arg)
 {
     struct iwx_softc *sc = (struct iwx_softc *)arg;
-    struct ieee80211com *ic = &sc->sc_ic;
     ItlIwx *that = container_of(sc, ItlIwx, com);
+    if (!that->getMainWorkLoop()->inGate()) {
+        that->getMainCommandGate()->runAction(
+            [](OSObject *, void *arg0, void *, void *, void *) -> IOReturn {
+                iwx_ba_task(arg0);
+                return kIOReturnSuccess;
+            }, arg);
+        return;
+    }
+    struct ieee80211com *ic = &sc->sc_ic;
+
     struct ieee80211_node *ni = ic->ic_bss;
     struct ieee80211_tx_ba *ba;
     struct iwx_tx_ring *ring;
     int s = splnet();
+    int generation = sc->sc_generation;
     int err = 0;
     int qid = 0;
     int tid;
     
-    if (sc->sc_flags & IWX_FLAG_SHUTDOWN) {
+    if (sc->sc_flags & IWX_FLAG_SHUTDOWN || ic->ic_state != IEEE80211_S_RUN ||
+        sc->ns_nstate != IEEE80211_S_RUN) {
         //        refcnt_rele_wake(&sc->task_refs);
         splx(s);
         return;
     }
 
     for (tid = 0; tid < IWX_MAX_TID_COUNT; tid++) {
-        if (sc->sc_flags & IWX_FLAG_SHUTDOWN)
+        if (sc->sc_flags & IWX_FLAG_SHUTDOWN || ic->ic_state != IEEE80211_S_RUN ||
+            sc->ns_nstate != IEEE80211_S_RUN)
             break;
         if (sc->ba_rx.start_tidmask & (1 << tid)) {
             struct ieee80211_rx_ba *ba = &ni->ni_rx_ba[tid];
             XYLog("%s ba_rx_start tid=%d, ssn=%d\n", __FUNCTION__, tid, ba->ba_winstart);
             that->iwx_sta_rx_agg(sc, ni, tid, ba->ba_winstart,
                                  ba->ba_winsize, ba->ba_timeout_val, 1);
+            if (generation != sc->sc_generation) {
+                splx(s);
+                return;
+            }
             sc->ba_rx.start_tidmask &= ~(1 << tid);
         } else if (sc->ba_rx.stop_tidmask & (1 << tid)) {
             that->iwx_sta_rx_agg(sc, ni, tid, 0, 0, 0, 0);
+            if (generation != sc->sc_generation) {
+                splx(s);
+                return;
+            }
             sc->ba_rx.stop_tidmask &= ~(1 << tid);
         }
     }
     
     for (tid = 0; tid < IWX_MAX_TID_COUNT; tid++) {
-        if (sc->sc_flags & IWX_FLAG_SHUTDOWN)
+        if (sc->sc_flags & IWX_FLAG_SHUTDOWN || ic->ic_state != IEEE80211_S_RUN ||
+            sc->ns_nstate != IEEE80211_S_RUN)
             break;
         if (sc->ba_tx.start_tidmask & (1 << tid)) {
             ba = &ni->ni_tx_ba[tid];
@@ -4397,6 +4475,10 @@ iwx_ba_task(void *arg)
             ieee80211_addba_resp_accept(ic, ni, tid);
             XYLog("%s tx queue alloc succeed qid=%d ssn=%d\n", __FUNCTION__, qid, ba->ba_winstart);
         out:
+            if (generation != sc->sc_generation) {
+                splx(s);
+                return;
+            }
             that->iwx_nic_unlock(sc);
             if (err)
                 ieee80211_addba_resp_refuse(ic, ni, tid,
@@ -4640,13 +4722,31 @@ out:
 }
 
 int ItlIwx::
+iwx_wait_notification(struct iwx_softc *sc, int *value, int bits, uint32_t milliseconds)
+{
+    int generation = sc->sc_generation;
+    AbsoluteTime deadline;
+    clock_interval_to_deadline(milliseconds, kMillisecondScale,
+        reinterpret_cast<uint64_t *>(&deadline));
+    while (generation == sc->sc_generation && (*value & bits) != bits) {
+        int result = getMainCommandGate()->commandSleep(value, deadline, THREAD_UNINT);
+        if (generation != sc->sc_generation)
+            return ENXIO;
+        if (result != THREAD_AWAKENED && (*value & bits) != bits)
+            return (result == THREAD_TIMED_OUT) ? EWOULDBLOCK : EINTR;
+    }
+    return generation == sc->sc_generation ? 0 : ENXIO;
+}
+
+int ItlIwx::
 iwx_load_firmware(struct iwx_softc *sc)
 {
     XYLog("%s\n", __FUNCTION__);
     struct iwx_fw_sects *fws;
-    int err/*, w*/;
+    int err;
 
     sc->sc_uc.uc_intr = 0;
+    sc->sc_uc.uc_ok = 0;
     
     fws = &sc->sc_fw.fw_sects[IWX_UCODE_TYPE_REGULAR];
     if (sc->sc_device_family >= IWX_DEVICE_FAMILY_AX210)
@@ -4658,11 +4758,11 @@ iwx_load_firmware(struct iwx_softc *sc)
         return err;
     }
     
-    /* wait for the firmware to load */
-//    for (w = 0; !sc->sc_uc.uc_intr && w < 10; w++) {
-//        err = tsleep_nsec(&sc->sc_uc, 0, "iwxuc", MSEC_TO_NSEC(100));
-//    }
-    err = tsleep_nsec(&sc->sc_uc, 0, "iwxuc", SEC_TO_NSEC(1));
+    err = iwx_wait_notification(sc, &sc->sc_uc.uc_intr, 1, 1000);
+    if (err == ENXIO)
+        return err;
+    if (!err && !sc->sc_uc.uc_ok)
+        err = EIO;
     if (err || !sc->sc_uc.uc_ok) {
         if (iwx_nic_lock(sc)) {
             XYLog("SecBoot CPU1 Status: 0x%x, CPU2 Status: 0x%x\n",
@@ -4684,8 +4784,8 @@ iwx_load_firmware(struct iwx_softc *sc)
     
     iwx_dma_contig_free(&sc->iml_dma);
     
-    if (!sc->sc_uc.uc_ok)
-        return EINVAL;
+    if (err)
+        return err;
     
     XYLog("%s: load firmware ok\n", DEVNAME(sc));
     
@@ -4837,17 +4937,10 @@ iwx_run_init_mvm_ucode(struct iwx_softc *sc, int readnvm)
     if (err)
         return err;
 
-    /* Wait for the init complete notification from the firmware. */
-//    while ((sc->sc_init_complete & wait_flags) != wait_flags) {
-//        err = tsleep_nsec(&sc->sc_init_complete, 0, "iwxinit",
-//            SEC_TO_NSEC(2));
-//        if (err)
-//            return err;
-//    }
-    err = tsleep_nsec(&sc->sc_init_complete, 0, "iwxinit", SEC_TO_NSEC(2));
-    if (err) {
+    /* INIT_COMPLETE can arrive before NVM_ACCESS_COMPLETE is acknowledged. */
+    err = iwx_wait_notification(sc, &sc->sc_init_complete, wait_flags, 2000);
+    if (err)
         return err;
-    }
 
     if (readnvm) {
         err = iwx_nvm_get(sc);
@@ -6248,6 +6341,14 @@ iwx_phy_ctxt_cmd(struct iwx_softc *sc, struct iwx_phy_ctxt *ctxt,
 int ItlIwx::
 iwx_send_cmd(struct iwx_softc *sc, struct iwx_host_cmd *hcmd)
 {
+    if (!getMainWorkLoop()->inGate()) {
+        return getMainCommandGate()->runAction(
+            [](OSObject *, void *arg0, void *arg1, void *arg2, void *) -> IOReturn {
+                ItlIwx *that = (ItlIwx *)arg0;
+                return that->iwx_send_cmd((struct iwx_softc *)arg1, (struct iwx_host_cmd *)arg2);
+            }, this, sc, hcmd);
+    }
+
     struct iwx_tx_ring *ring = &sc->txq[IWX_DQA_CMD_QUEUE];
     struct iwx_tfh_tfd *desc;
     struct iwx_tx_data *txdata;
@@ -6255,17 +6356,31 @@ iwx_send_cmd(struct iwx_softc *sc, struct iwx_host_cmd *hcmd)
     mbuf_t m;
     bus_addr_t paddr;
     uint64_t addr;
-    int err = 0, i, paylen, off, s;
+    int err = 0, i, paylen, off;
     int idx, code, async, group_id;
     size_t hdrlen, datasz;
     uint8_t *data;
     int generation = sc->sc_generation;
     unsigned int max_chunks = 1;
     IOPhysicalSegment seg;
-    
+    AbsoluteTime deadline;
+
+    hcmd->resp_pkt = NULL;
+    if ((sc->sc_flags & (IWX_FLAG_SHUTDOWN | IWX_FLAG_HW_ERR)) ||
+        ring->ring_count == 0)
+        return ENXIO;
+
     code = hcmd->id;
     async = hcmd->flags & IWX_CMD_ASYNC;
     idx = (ring->cur & (ring->ring_count - 1));
+    desc = &ring->desc[idx];
+    txdata = &ring->data[idx];
+    /* A completed synchronous command owns its slot until its caller wakes. */
+    if (ring->queued >= ring->ring_count - 1 ||
+        (txdata->flags & (IWX_TXDATA_FLAG_CMD_PENDING | IWX_TXDATA_FLAG_CMD_WAITING)))
+        return ENOSPC;
+    if ((hcmd->flags & IWX_CMD_WANT_RESP) && async)
+        return EINVAL;
     
     for (i = 0, paylen = 0; i < nitems(hcmd->len); i++) {
         paylen += hcmd->len[i];
@@ -6290,12 +6405,7 @@ iwx_send_cmd(struct iwx_softc *sc, struct iwx_host_cmd *hcmd)
     } else {
         sc->sc_cmd_resp_pkt[idx] = NULL;
     }
-    
-    s = splnet();
-    
-    desc = &ring->desc[idx];
-    txdata = &ring->data[idx];
-    
+
     /*
      * XXX Intel inside (tm)
      * Firmware API versions >= 50 reject old-style commands in
@@ -6322,7 +6432,8 @@ iwx_send_cmd(struct iwx_softc *sc, struct iwx_host_cmd *hcmd)
             err = EINVAL;
             goto out;
         }
-        mbuf_allocpacket(MBUF_WAITOK, totlen, &max_chunks, &m);
+        m = NULL;
+        mbuf_allocpacket(MBUF_DONTWAIT, totlen, &max_chunks, &m);
         if (m == NULL) {
             XYLog("%s: could not get fw cmd mbuf (%zd bytes)\n",
                   DEVNAME(sc), totlen);
@@ -6337,6 +6448,7 @@ iwx_send_cmd(struct iwx_softc *sc, struct iwx_host_cmd *hcmd)
             XYLog("%s: could not load fw cmd mbuf (%zd bytes)\n",
                   DEVNAME(sc), totlen);
             mbuf_freem(m);
+            err = EIO;
             goto out;
         }
 //                XYLog("map fw cmd dm_nsegs=%d\n", txdata->map->dm_nsegs);
@@ -6390,30 +6502,41 @@ iwx_send_cmd(struct iwx_softc *sc, struct iwx_host_cmd *hcmd)
     //        sizeof (*desc), BUS_DMASYNC_PREWRITE);
     /* Kick command ring. */
     DPRINTF(("%s: Sending command (%.2x.%.2x), %d bytes at [%d]:%d ver: %d\n", __func__, group_id, cmd->hdr.cmd, cmd->hdr_wide.length, cmd->hdr.idx, cmd->hdr.qid, cmd->hdr_wide.version));
+    txdata->flags |= IWX_TXDATA_FLAG_CMD_PENDING;
+    if (!async)
+        txdata->flags |= IWX_TXDATA_FLAG_CMD_WAITING;
     ring->queued++;
     ring->cur = (ring->cur + 1) % getTxQueueSize();
     IWX_WRITE(sc, IWX_HBUS_TARG_WRPTR, ring->qid << 16 | ring->cur);
     
     if (!async) {
-        err = tsleep_nsec(desc, PCATCH, "iwxcmd", SEC_TO_NSEC(1));
-        if (err == 0) {
-            /* if hardware is no longer up, return error */
-            if (generation != sc->sc_generation) {
-                err = ENXIO;
-                goto out;
+        clock_interval_to_deadline(1, kSecondScale,
+            reinterpret_cast<uint64_t *>(&deadline));
+        while (generation == sc->sc_generation &&
+            (txdata->flags & IWX_TXDATA_FLAG_CMD_PENDING)) {
+            int result = getMainCommandGate()->commandSleep(desc, deadline, THREAD_UNINT);
+            if (result != THREAD_AWAKENED) {
+                if (txdata->flags & IWX_TXDATA_FLAG_CMD_PENDING)
+                    err = (result == THREAD_TIMED_OUT) ? EWOULDBLOCK : EINTR;
+                break;
             }
-            
-            /* Response buffer will be freed in iwx_free_resp(). */
+        }
+        /* Reset owns the old buffers, including after a timed-out sleep. */
+        if (generation != sc->sc_generation)
+            return ENXIO;
+        txdata->flags &= ~IWX_TXDATA_FLAG_CMD_WAITING;
+        if (!err) {
             hcmd->resp_pkt = (struct iwx_rx_packet *)sc->sc_cmd_resp_pkt[idx];
             sc->sc_cmd_resp_pkt[idx] = NULL;
-        } else if (generation == sc->sc_generation) {
-            ::free(sc->sc_cmd_resp_pkt[idx]);
-            sc->sc_cmd_resp_pkt[idx] = NULL;
+            sc->sc_cmd_resp_len[idx] = 0;
         }
     }
 out:
-    splx(s);
-    
+    if (err) {
+        ::free(sc->sc_cmd_resp_pkt[idx]);
+        sc->sc_cmd_resp_pkt[idx] = NULL;
+        sc->sc_cmd_resp_len[idx] = 0;
+    }
     return err;
 }
 
@@ -6448,8 +6571,10 @@ iwx_send_cmd_status(struct iwx_softc *sc, struct iwx_host_cmd *cmd,
         return err;
     
     pkt = cmd->resp_pkt;
-    if (pkt == NULL || (pkt->hdr.group_id & IWX_CMD_FAILED_MSK))
+    if (pkt == NULL || (pkt->hdr.group_id & IWX_CMD_FAILED_MSK)) {
+        iwx_free_resp(sc, cmd);
         return EIO;
+    }
     
     resp_len = iwx_rx_packet_payload_len(pkt);
     if (resp_len != sizeof(*resp)) {
@@ -6490,11 +6615,14 @@ iwx_cmd_done(struct iwx_softc *sc, int qid, int idx, int code)
     struct iwx_tx_ring *ring = &sc->txq[IWX_DQA_CMD_QUEUE];
     struct iwx_tx_data *data;
     
-    if (qid != IWX_DQA_CMD_QUEUE) {
+    if (qid != IWX_DQA_CMD_QUEUE || idx < 0 || idx >= ring->ring_count) {
         return;    /* Not a command ack. */
     }
     
     data = &ring->data[idx];
+    if (!(data->flags & IWX_TXDATA_FLAG_CMD_PENDING))
+        return;
+    data->flags &= ~IWX_TXDATA_FLAG_CMD_PENDING;
     
     if (data->m != NULL) {
         //        bus_dmamap_sync(sc->sc_dmat, data->map, 0,
@@ -6503,7 +6631,7 @@ iwx_cmd_done(struct iwx_softc *sc, int qid, int idx, int code)
         mbuf_freem(data->m);
         data->m = NULL;
     }
-    wakeupOn(&ring->desc[idx]);
+    getMainCommandGate()->commandWakeup(&ring->desc[idx]);
     
     DPRINTF(("%s: command 0x%x done\n", __func__, code));
     if (ring->queued == 0) {
@@ -6928,7 +7056,7 @@ out:
 int ItlIwx::
 iwx_flush_sta(struct iwx_softc *sc, struct iwx_node *in)
 {
-    int err;
+    int err, generation = sc->sc_generation;
     
     splassert(IPL_NET);
     
@@ -6936,7 +7064,7 @@ iwx_flush_sta(struct iwx_softc *sc, struct iwx_node *in)
     
     err = iwx_drain_sta(sc, in, 1);
     
-    if (err == ENXIO)
+    if (err)
         goto done;
     
     err = iwx_flush_sta_tids(sc, IWX_STATION_ID, 0xffff);
@@ -6947,12 +7075,12 @@ iwx_flush_sta(struct iwx_softc *sc, struct iwx_node *in)
     }
     
     err = iwx_drain_sta(sc, in, 0);
-    if (err == ENXIO)
+    if (err)
         goto done;
-    else
-        err = 0;
+
 done:
-    sc->sc_flags &= ~IWX_FLAG_TXFLUSH;
+    if (generation == sc->sc_generation)
+        sc->sc_flags &= ~IWX_FLAG_TXFLUSH;
     return err;
 }
 
@@ -7303,7 +7431,8 @@ iwx_rm_sta_cmd(struct iwx_softc *sc, struct iwx_node *in)
     err = iwx_send_cmd_pdu(sc, IWX_REMOVE_STA, 0, sizeof(rm_sta_cmd),
                            &rm_sta_cmd);
     
-    sc->sc_flags &= ~IWX_FLAG_STA_ACTIVE;
+    if (!err)
+        sc->sc_flags &= ~IWX_FLAG_STA_ACTIVE;
 
     return err;
 }
@@ -8609,7 +8738,7 @@ iwx_scan(struct iwx_softc *sc)
         ieee80211_node_cleanup(ic, ic->ic_bss);
     }
     ic->ic_state = IEEE80211_S_SCAN;
-    wakeupOn(&ic->ic_state); /* wake iwx_init() */
+    getMainCommandGate()->commandWakeup(&ic->ic_state); /* wake iwx_init() */
     
     return 0;
 }
@@ -9398,14 +9527,19 @@ iwx_deauth(struct iwx_softc *sc)
     XYLog("%s\n", __FUNCTION__);
     struct ieee80211com *ic = &sc->sc_ic;
     struct iwx_node *in = (struct iwx_node *)ic->ic_bss;
-    int err;
+    int err, generation = sc->sc_generation;
     
     splassert(IPL_NET);
     
     if (!isset(sc->sc_enabled_capa, IWX_UCODE_TLV_CAPA_SESSION_PROT_CMD))
         iwx_unprotect_session(sc, in);
-    else
-        iwx_cancel_session_protection(sc, in);
+    else {
+        err = iwx_cancel_session_protection(sc, in);
+        if (err)
+            return err;
+    }
+    if (generation != sc->sc_generation)
+        return ENXIO;
     
     if (sc->sc_flags & IWX_FLAG_STA_ACTIVE) {
         err = iwx_rm_sta(sc, in);
@@ -9599,7 +9733,9 @@ iwx_run_stop(struct iwx_softc *sc)
         struct iwx_rxba_data *rxba = &sc->sc_rxba_data[i];
         if (rxba->baid == IWX_RX_REORDER_DATA_INVALID_BAID)
             continue;
-        iwx_sta_rx_agg(sc, ic->ic_bss, rxba->tid, 0, 0, 0, 0);
+        err = iwx_sta_rx_agg(sc, ic->ic_bss, rxba->tid, 0, 0, 0, 0);
+        if (err)
+            return err;
     }
     
     err = iwx_sf_config(sc, IWX_SF_INIT_OFF);
@@ -9749,12 +9885,21 @@ iwx_newstate_task(void *psc)
 {
     XYLog("%s\n", __FUNCTION__);
     struct iwx_softc *sc = (struct iwx_softc *)psc;
+    ItlIwx *that = container_of(sc, ItlIwx, com);
+    if (!that->getMainWorkLoop()->inGate()) {
+        that->getMainCommandGate()->runAction(
+            [](OSObject *, void *arg0, void *, void *, void *) -> IOReturn {
+                iwx_newstate_task(arg0);
+                return kIOReturnSuccess;
+            }, psc);
+        return;
+    }
     struct ieee80211com *ic = &sc->sc_ic;
     enum ieee80211_state nstate = sc->ns_nstate;
     enum ieee80211_state ostate = ic->ic_state;
+    int generation = sc->sc_generation;
     int arg = sc->ns_arg;
     int err = 0, s = splnet();
-    ItlIwx *that = container_of(sc, ItlIwx, com);
     
     XYLog("%s sc->sc_flags & IWX_FLAG_SHUTDOWN %s\n", __FUNCTION__, sc->sc_flags & IWX_FLAG_SHUTDOWN ? "true" : "false");
     if (sc->sc_flags & IWX_FLAG_SHUTDOWN) {
@@ -9797,7 +9942,7 @@ iwx_newstate_task(void *psc)
         }
         
         /* Die now if iwx_stop() was called while we were sleeping. */
-        if (sc->sc_flags & IWX_FLAG_SHUTDOWN) {
+        if (generation != sc->sc_generation || (sc->sc_flags & IWX_FLAG_SHUTDOWN)) {
             //            refcnt_rele_wake(&sc->task_refs);
             splx(s);
             return;
@@ -9836,7 +9981,7 @@ iwx_newstate_task(void *psc)
     }
     
 out:
-    if ((sc->sc_flags & IWX_FLAG_SHUTDOWN) == 0) {
+    if (generation == sc->sc_generation && (sc->sc_flags & IWX_FLAG_SHUTDOWN) == 0) {
         if (err)
             task_add(systq, &sc->init_task);
         else
@@ -9862,6 +10007,7 @@ iwx_newstate(struct ieee80211com *ic, enum ieee80211_state nstate, int arg)
      */
     if (sc->ns_nstate == nstate && nstate != IEEE80211_S_SCAN &&
         nstate != IEEE80211_S_AUTH)
+        return 0;
     
     if (ic->ic_state == IEEE80211_S_RUN) {
         if (nstate == IEEE80211_S_SCAN) {
@@ -10176,7 +10322,7 @@ iwx_init_hw(struct iwx_softc *sc)
 {
     XYLog("%s\n", __FUNCTION__);
     struct ieee80211com *ic = &sc->sc_ic;
-    int err, i;
+    int err, i, generation = sc->sc_generation;
     
     err = iwx_preinit(sc);
     if (err)
@@ -10217,17 +10363,17 @@ iwx_init_hw(struct iwx_softc *sc)
     if (err) {
         XYLog("%s: could not init bt coex (error %d)\n",
                DEVNAME(sc), err);
-        return err;
+        goto err;
     }
     
     err = iwx_send_soc_conf(sc);
     if (err)
-        return err;
+        goto err;
     
     if (isset(sc->sc_enabled_capa, IWX_UCODE_TLV_CAPA_DQA_SUPPORT)){
         err = iwx_send_dqa_cmd(sc);
         if (err)
-            return err;
+            goto err;
     }
     
     /* Add auxiliary station for scanning */
@@ -10260,6 +10406,7 @@ iwx_init_hw(struct iwx_softc *sc)
         if (err) {
             XYLog("%s: PCIe LTR configuration failed (error %d)\n",
                   DEVNAME(sc), err);
+            goto err;
         }
     }
     
@@ -10300,7 +10447,8 @@ iwx_init_hw(struct iwx_softc *sc)
     }
     
 err:
-    iwx_nic_unlock(sc);
+    if (generation == sc->sc_generation)
+        iwx_nic_unlock(sc);
     return err;
 }
 
@@ -10333,6 +10481,14 @@ iwx_allow_mcast(struct iwx_softc *sc)
 int ItlIwx::
 iwx_init(struct _ifnet *ifp)
 {
+    if (!getMainWorkLoop()->inGate()) {
+        return getMainCommandGate()->runAction(
+            [](OSObject *, void *arg0, void *arg1, void *, void *) -> IOReturn {
+                ItlIwx *that = (ItlIwx *)arg0;
+                return that->iwx_init((struct _ifnet *)arg1);
+            }, this, ifp);
+    }
+
     XYLog("%s\n", __FUNCTION__);
     struct iwx_softc *sc = (struct iwx_softc *)ifp->if_softc;
     struct ieee80211com *ic = &sc->sc_ic;
@@ -10355,11 +10511,18 @@ iwx_init(struct _ifnet *ifp)
     if (ic->ic_event_handler)
         ic->ic_event_handler(ic, IEEE80211_EVT_DRIVER_RESET_BEGIN, NULL);
 #endif
-    err = iwx_init_hw(sc);
-    if (err) {
-        if (generation == sc->sc_generation)
-            iwx_stop_device(sc);
-        return err;
+    for (int attempt = 0; ; attempt++) {
+        err = iwx_init_hw(sc);
+        if (generation != sc->sc_generation)
+            return ENXIO;
+        if (!err)
+            break;
+        generation = ++sc->sc_generation;
+        iwx_stop_device(sc);
+        if (attempt != 0 || err == ENXIO || !(ifp->if_flags & IFF_UP) ||
+            (sc->sc_flags & (IWX_FLAG_RFKILL | IWX_FLAG_HW_ERR)))
+            return err;
+        XYLog("%s: retrying firmware initialization after error %d\n", DEVNAME(sc), err);
     }
     
     if (sc->sc_nvm.sku_cap_11n_enable)
@@ -10387,33 +10550,21 @@ iwx_init(struct _ifnet *ifp)
      * ieee80211_begin_scan() ends up scheduling iwx_newstate_task().
      * Wait until the transition to SCAN state has completed.
      */
-#ifdef AIRPORT_WCL
-    // The state task may finish before msleep begins, so wakeup alone is not
-    // evidence of completion. Recheck the predicate even when sleep times out.
+    AbsoluteTime deadline;
+    clock_interval_to_deadline(1, kSecondScale,
+        reinterpret_cast<uint64_t *>(&deadline));
     while (ic->ic_state != IEEE80211_S_SCAN) {
-        err = tsleep_nsec(&ic->ic_state, PCATCH, "iwxinit", SEC_TO_NSEC(1));
+        int result = getMainCommandGate()->commandSleep(&ic->ic_state, deadline, THREAD_UNINT);
         if (generation != sc->sc_generation)
             return ENXIO;
-        if (err && ic->ic_state != IEEE80211_S_SCAN) {
+        if (result != THREAD_AWAKENED && ic->ic_state != IEEE80211_S_SCAN) {
             iwx_stop(ifp);
-            return err;
+            return (result == THREAD_TIMED_OUT) ? EWOULDBLOCK : EINTR;
         }
     }
     if (generation != sc->sc_generation)
         return ENXIO;
-#else
-    do {
-        err = tsleep_nsec(&ic->ic_state, PCATCH, "iwxinit",
-            SEC_TO_NSEC(1));
-        if (generation != sc->sc_generation)
-            return ENXIO;
-        if (err) {
-            iwx_stop(ifp);
-            return err;
-        }
-    } while (ic->ic_state != IEEE80211_S_SCAN);
-#endif
-    
+
 #ifdef AIRPORT_WCL
     if (ic->ic_event_handler)
         ic->ic_event_handler(ic, IEEE80211_EVT_DRIVER_READY, NULL);
@@ -10433,7 +10584,9 @@ _iwx_start_task(OSObject *target, void *arg0, void *arg1, void *arg2, void *arg3
     mbuf_t m;
     int ac = EDCA_AC_BE; /* XXX */
     
-    if (!(ifp->if_flags & IFF_RUNNING) ||  ifq_is_oactive(&ifp->if_snd)) {
+    if (!(ifp->if_flags & IFF_RUNNING) || ifq_is_oactive(&ifp->if_snd) ||
+        (sc->sc_flags & (IWX_FLAG_SHUTDOWN | IWX_FLAG_TXFLUSH)) ||
+        (ic->ic_state == IEEE80211_S_RUN && sc->ns_nstate != IEEE80211_S_RUN)) {
         return kIOReturnError;
     }
     
@@ -10512,6 +10665,16 @@ iwx_start(struct _ifnet *ifp)
 void ItlIwx::
 iwx_stop(struct _ifnet *ifp)
 {
+    if (!getMainWorkLoop()->inGate()) {
+        getMainCommandGate()->runAction(
+            [](OSObject *, void *arg0, void *arg1, void *, void *) -> IOReturn {
+                ItlIwx *that = (ItlIwx *)arg0;
+                that->iwx_stop((struct _ifnet *)arg1);
+                return kIOReturnSuccess;
+            }, this, ifp);
+        return;
+    }
+
     struct iwx_softc *sc = (struct iwx_softc *)ifp->if_softc;
     struct ieee80211com *ic = &sc->sc_ic;
     struct iwx_node *in = (struct iwx_node *)ic->ic_bss;
@@ -10520,6 +10683,10 @@ iwx_stop(struct _ifnet *ifp)
     //    rw_assert_wrlock(&sc->ioctl_rwl);
     
     sc->sc_flags |= IWX_FLAG_SHUTDOWN; /* Disallow new tasks. */
+    sc->sc_generation++;
+    getMainCommandGate()->commandWakeup(&sc->sc_uc.uc_intr);
+    getMainCommandGate()->commandWakeup(&sc->sc_init_complete);
+    getMainCommandGate()->commandWakeup(&ic->ic_state);
     
     /* Cancel scheduled tasks and let any stale tasks finish up. */
     task_del(systq, &sc->init_task);
@@ -10534,12 +10701,6 @@ iwx_stop(struct _ifnet *ifp)
     
     /* Reset soft state. */
     
-    sc->sc_generation++;
-    for (i = 0; i < nitems(sc->sc_cmd_resp_pkt); i++) {
-        ::free(sc->sc_cmd_resp_pkt[i]);
-        sc->sc_cmd_resp_pkt[i] = NULL;
-        sc->sc_cmd_resp_len[i] = 0;
-    }
     ifp->if_flags &= ~IFF_RUNNING;
 #ifdef AIRPORT_WCL
     // A stopped firmware scan cannot deliver its completion event.
@@ -10566,7 +10727,6 @@ iwx_stop(struct _ifnet *ifp)
     sc->sc_flags &= ~IWX_FLAG_STA_ACTIVE;
     sc->sc_flags &= ~IWX_FLAG_TE_ACTIVE;
     sc->sc_flags &= ~IWX_FLAG_HW_ERR;
-    sc->sc_flags &= ~IWX_FLAG_SHUTDOWN;
     sc->sc_flags &= ~IWX_FLAG_TXFLUSH;
 
     sc->sc_rx_ba_sessions = 0;
@@ -10584,6 +10744,7 @@ iwx_stop(struct _ifnet *ifp)
     }
     
     ifp->if_timer = sc->sc_tx_timer = 0;
+    sc->sc_flags &= ~IWX_FLAG_SHUTDOWN;
     
     splx(s);
 }
@@ -11007,7 +11168,8 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data, struct mbuf_list *ml)
          * LEGACY group. Firmware API versions >= 50 reject commands
          * in group 0, forcing us to use this hack.
          */
-        if (iwx_cmd_groupid(code) == IWX_LONG_GROUP) {
+        if (iwx_cmd_groupid(code) == IWX_LONG_GROUP &&
+            qid == IWX_DQA_CMD_QUEUE && idx < sc->txq[qid].ring_count) {
             struct iwx_tx_ring *ring = &sc->txq[qid];
             struct iwx_tx_data *txdata = &ring->data[idx];
             if (txdata->flags & IWX_TXDATA_FLAG_CMD_IS_NARROW)
@@ -11123,7 +11285,7 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data, struct mbuf_list *ml)
                 }
                 
                 sc->sc_uc.uc_intr = 1;
-                wakeupOn(&sc->sc_uc);
+                getMainCommandGate()->commandWakeup(&sc->sc_uc.uc_intr);
                 break;
             }
                 
@@ -11187,7 +11349,10 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data, struct mbuf_list *ml)
             case IWX_SCD_QUEUE_CFG: {
                 size_t pkt_len;
                 
-                if (sc->sc_cmd_resp_pkt[idx] == NULL)
+                if (qid != IWX_DQA_CMD_QUEUE ||
+                    idx >= sc->txq[IWX_DQA_CMD_QUEUE].ring_count ||
+                    !(sc->txq[IWX_DQA_CMD_QUEUE].data[idx].flags & IWX_TXDATA_FLAG_CMD_PENDING) ||
+                    sc->sc_cmd_resp_pkt[idx] == NULL)
                     break;
                 
                 //            bus_dmamap_sync(sc->sc_dmat, data->map, 0,
@@ -11211,7 +11376,8 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data, struct mbuf_list *ml)
             }
                 
             case IWX_WIDE_ID(IWX_REGULATORY_AND_NVM_GROUP, IWX_PNVM_INIT_COMPLETE_NTFY):
-                wakeupOn(&sc->sc_init_complete);
+                sc->sc_init_complete |= IWX_PNVM_COMPLETE;
+                getMainCommandGate()->commandWakeup(&sc->sc_init_complete);
                 struct iwl_pnvm_init_complete_ntfy *pnvm_ntf;
                 SYNC_RESP_STRUCT(pnvm_ntf, pkt, struct iwl_pnvm_init_complete_ntfy *);
                 XYLog("PNVM complete notification received with status 0x%0x\n", le32toh(pnvm_ntf->status));
@@ -11219,7 +11385,7 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data, struct mbuf_list *ml)
                 
             case IWX_INIT_COMPLETE_NOTIF:
                 sc->sc_init_complete |= IWX_INIT_COMPLETE;
-                wakeupOn(&sc->sc_init_complete);
+                getMainCommandGate()->commandWakeup(&sc->sc_init_complete);
                 break;
                 
             case IWX_SCAN_COMPLETE_UMAC: {
@@ -12875,9 +13041,17 @@ iwx_match(IOPCIDevice *device)
 int ItlIwx::
 iwx_preinit(struct iwx_softc *sc)
 {
+    if (!getMainWorkLoop()->inGate()) {
+        return getMainCommandGate()->runAction(
+            [](OSObject *, void *arg0, void *arg1, void *, void *) -> IOReturn {
+                ItlIwx *that = (ItlIwx *)arg0;
+                return that->iwx_preinit((struct iwx_softc *)arg1);
+            }, this, sc);
+    }
+
     struct ieee80211com *ic = &sc->sc_ic;
     struct _ifnet *ifp = IC2IFP(ic);
-    int err;
+    int err, generation = sc->sc_generation;
     static int attached;
     
     err = iwx_prepare_card_hw(sc);
@@ -12900,6 +13074,8 @@ iwx_preinit(struct iwx_softc *sc)
     }
     
     err = iwx_run_init_mvm_ucode(sc, 1);
+    if (generation != sc->sc_generation)
+        return ENXIO;
     iwx_stop_device(sc);
     if (err)
         return err;
@@ -13337,8 +13513,17 @@ iwx_init_task(void *arg1)
 {
     XYLog("%s\n", __FUNCTION__);
     struct iwx_softc *sc = (struct iwx_softc *)arg1;
-    struct _ifnet *ifp = &sc->sc_ic.ic_if;
     ItlIwx *that = container_of(sc, ItlIwx, com);
+    if (!that->getMainWorkLoop()->inGate()) {
+        that->getMainCommandGate()->runAction(
+            [](OSObject *, void *arg0, void *, void *, void *) -> IOReturn {
+                iwx_init_task(arg0);
+                return kIOReturnSuccess;
+            }, arg1);
+        return;
+    }
+    struct _ifnet *ifp = &sc->sc_ic.ic_if;
+
     int s = splnet();
     int generation = sc->sc_generation;
     int fatal = (sc->sc_flags & (IWX_FLAG_HW_ERR | IWX_FLAG_RFKILL));
@@ -13359,7 +13544,7 @@ iwx_init_task(void *arg1)
 #ifdef AIRPORT_WCL
     {
         int error = that->iwx_init(ifp);
-        if (error && !(ifp->if_flags & IFF_RUNNING)) {
+        if (error && error != ENXIO && !(ifp->if_flags & IFF_RUNNING)) {
             sc->sc_ic.ic_wcl_mac_reconfig = false;
             ifp->if_flags &= ~IFF_UP;
             if (sc->sc_ic.ic_event_handler)
@@ -13407,11 +13592,8 @@ iwx_activate(struct iwx_softc *sc, int act)
     
     switch (act) {
         case DVACT_QUIESCE:
-            if (ifp->if_flags & IFF_RUNNING) {
-                //            rw_enter_write(&sc->ioctl_rwl);
-                iwx_stop(ifp);
-                //            rw_exit(&sc->ioctl_rwl);
-            }
+            /* Also cancel a firmware load that has not reached IFF_RUNNING. */
+            iwx_stop(ifp);
             break;
         case DVACT_RESUME:
             err = iwx_resume(sc);

@@ -303,7 +303,7 @@ public:
     static void    iwx_rx_ba_session_expired(void *);
     static void    iwx_reorder_timer_expired(void *);
     static void    iwx_update_chw(struct ieee80211com *);
-    void    iwx_sta_rx_agg(struct iwx_softc *, struct ieee80211_node *, uint8_t,
+    int     iwx_sta_rx_agg(struct iwx_softc *, struct ieee80211_node *, uint8_t,
                            uint16_t, uint16_t, int, int);
     static int    iwx_ampdu_tx_start(struct ieee80211com *, struct ieee80211_node *,
             uint8_t);
@@ -355,6 +355,7 @@ public:
     int    iwx_phy_ctxt_cmd(struct iwx_softc *, struct iwx_phy_ctxt *, uint8_t,
             uint8_t, uint32_t, uint32_t);
     int    iwx_send_cmd(struct iwx_softc *, struct iwx_host_cmd *);
+    int    iwx_wait_notification(struct iwx_softc *, int *, int, uint32_t);
     int    iwx_send_cmd_pdu(struct iwx_softc *, uint32_t, uint32_t, uint16_t,
             const void *);
     int    iwx_send_cmd_status(struct iwx_softc *, struct iwx_host_cmd *,

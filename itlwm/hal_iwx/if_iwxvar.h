@@ -335,6 +335,8 @@ struct iwx_tx_data {
 	struct iwx_node *in;
     int flags;
 #define IWX_TXDATA_FLAG_CMD_IS_NARROW  0x01
+#define IWX_TXDATA_FLAG_CMD_PENDING    0x02
+#define IWX_TXDATA_FLAG_CMD_WAITING    0x04
     uint8_t type;
 };
 
@@ -659,6 +661,7 @@ struct iwx_softc {
 	int sc_init_complete;
 #define IWX_INIT_COMPLETE	0x01
 #define IWX_CALIB_COMPLETE	0x02
+#define IWX_PNVM_COMPLETE    0x04
 
 	struct iwx_ucode_status sc_uc;
 	char sc_fwver[32];
