@@ -923,8 +923,12 @@ getCARD_CAPABILITIES(OSObject *object,
 
     cd->version = APPLE80211_VERSION;
 #ifdef AIRPORT_WCL
-    cd->capabilities[0] = (caps & IEEE80211_C_RSN) ? (1 << APPLE80211_CAP_AES_CCM) : 0;
-    cd->capabilities[1] &= ~((1 << (APPLE80211_CAP_WPA1 - 8)) | (1 << (APPLE80211_CAP_TKIPMIC - 8)));
+    // WPA2 can use TKIP for group traffic even when unicast uses CCMP.
+    // net80211 handles TKIP/MIC in software; hiding it makes Apple80211
+    // reject these networks before it submits an association request.
+    cd->capabilities[0] = (caps & IEEE80211_C_RSN) ?
+        (1 << APPLE80211_CAP_AES_CCM) | (1 << APPLE80211_CAP_TKIP) : 0;
+    cd->capabilities[1] &= ~(1 << (APPLE80211_CAP_WPA1 - 8));
     cd->capabilities[5] = 0x40; // Scan completion events.
     cd->capabilities[2] = (1 << (APPLE80211_CAP_WME - 16)) |
         (1 << (APPLE80211_CAP_SHORT_GI_40MHZ - 16)) |
