@@ -939,6 +939,10 @@ getCARD_CAPABILITIES(OSObject *object,
     cd->capabilities[2] = (1 << (APPLE80211_CAP_WME - 16)) |
         (1 << (APPLE80211_CAP_SHORT_GI_40MHZ - 16)) |
         (1 << (APPLE80211_CAP_SHORT_GI_20MHZ - 16));
+    // Tahoe WCLDeviceConfiguration::isHeSupported reads byte 17, bit 7.
+    // WCL uses this capability together with the BSS HE IE for PHY reporting.
+    if (caps & IEEE80211_C_HE)
+        cd->capabilities[17] |= 0x80;
 #else
     cd->capabilities[2] = 0xFF; // BURST, WME, SHORT_GI_40MHZ, SHORT_GI_20MHZ, WOW, TSN, ?, ?
     cd->capabilities[3] = 0x2B;

@@ -662,6 +662,7 @@ struct ieee80211_ess {
 #define IEEE80211_C_TX_AMPDU_SETUP_IN_HW 0x00040000 /* CAPABILITY: BA negotiation in HW */
 #define IEEE80211_C_SUPPORTS_VHT_EXT_NSS_BW 0x00080000  /* CAPABILITY: for 160mhz */
 #define IEEE80211_C_TX_AMPDU_SETUP_IN_RS 0x00100000
+#define IEEE80211_C_HE 0x00200000 /* CAPABILITY: initialized HE support */
 
 /* flags for ieee80211_fix_rate() */
 #define	IEEE80211_F_DOSORT	0x00000001	/* sort rate list */

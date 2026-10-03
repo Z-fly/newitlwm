@@ -177,6 +177,7 @@ ieee80211_channel_init(struct _ifnet *ifp)
      * a default channel if not already specified.
      */
     memset(ic->ic_chan_avail, 0, sizeof(ic->ic_chan_avail));
+    ic->ic_caps &= ~IEEE80211_C_HE;
     ic->ic_modecaps |= 1<<IEEE80211_MODE_AUTO;
     for (i = 0; i <= IEEE80211_CHAN_MAX; i++) {
         c = &ic->ic_channels[i];
@@ -206,8 +207,10 @@ ieee80211_channel_init(struct _ifnet *ifp)
                 ic->ic_modecaps |= 1<<IEEE80211_MODE_11N;
             if (IEEE80211_IS_CHAN_AC(c))
                 ic->ic_modecaps |= 1<<IEEE80211_MODE_11AC;
-            if (IEEE80211_IS_CHAN_N(c) && (ic->ic_flags & IEEE80211_F_HEON))
+            if (IEEE80211_IS_CHAN_N(c) && (ic->ic_flags & IEEE80211_F_HEON)) {
                 ic->ic_modecaps |= 1<<IEEE80211_MODE_11AX;
+                ic->ic_caps |= IEEE80211_C_HE;
+            }
         }
     }
     /* validate ic->ic_curmode */
