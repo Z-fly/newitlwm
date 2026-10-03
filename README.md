@@ -15,8 +15,8 @@ We highly recommend exploring our documentation before using this Kernel Extensi
 This fork supports macOS Tahoe 26.x (x86_64) through the native Wi-Fi interface,
 including scanning, connecting, network switching, and private Wi-Fi addresses.
 
-- **Wi-Fi 6 (802.11ax / HE) is enabled by default** on supported adapters.
-  No `itlwm_he=1` boot argument is needed; use `itlwm_he=0` to disable HE.
+- **Wi-Fi 6 (802.11ax / HE) is disabled by default.**
+  Add `itlwm_he=1` to enable it on supported adapters.
 - WPA2-Personal and WPA2/WPA3 transition networks with optional PMF are supported.
   WPA3-only, mandatory PMF, AWDL / AirDrop, and MLO are not supported.
 - Device support follows the upstream hardware table; Tahoe compatibility still
