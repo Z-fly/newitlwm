@@ -640,6 +640,26 @@ iwm_sta_tx_agg(struct iwm_softc *sc, struct ieee80211_node *ni, uint8_t tid, uin
     uint32_t status;
     size_t cmdsize;
 
+    if (tid >= IWM_MAX_TID_COUNT)
+        return EINVAL;
+    if (!start) {
+        /* Stop admitting frames before waiting for the firmware to drain DMA.
+         * The command wait must stay outside the workloop gate. */
+        getMainCommandGate()->runAction([](OSObject *, void *arg0, void *arg1,
+            void *, void *) -> IOReturn {
+            auto sc = static_cast<struct iwm_softc *>(arg0);
+            unsigned tid = static_cast<unsigned>(reinterpret_cast<uintptr_t>(arg1));
+            sc->agg_tid_disable |= (1 << tid);
+            return kIOReturnSuccess;
+        }, sc, reinterpret_cast<void *>(static_cast<uintptr_t>(tid)));
+        int generation = sc->sc_generation;
+        err = iwm_flush_tx_path(sc, 1 << (IWM_FIRST_AGG_TX_QUEUE + tid));
+        if (err)
+            return err;
+        if (generation != sc->sc_generation)
+            return ENXIO;
+    }
+
     memset(&cmd, 0, sizeof(cmd));
 
     cmd.mac_id_n_color = htole32(IWM_FW_CMD_ID_AND_COLOR(in->in_id, in->in_color));
@@ -1058,9 +1078,35 @@ void ieee80211_tx_status(struct iwm_softc *sc, struct ieee80211_tx_info *info, i
         ifp->netStat->outputErrors++;
 }
 
+/* A delayed completion must not wrap through the ring and reclaim new TX. */
+static bool
+iwm_txq_advance_valid(const struct iwm_tx_ring *ring, int idx)
+{
+    if (idx < 0 || idx >= IWM_TX_RING_COUNT)
+        return false;
+    unsigned pending = (ring->cur - ring->tail + IWM_TX_RING_COUNT) % IWM_TX_RING_COUNT;
+    unsigned advance = (idx - ring->tail + IWM_TX_RING_COUNT) % IWM_TX_RING_COUNT;
+    return advance <= pending;
+}
+
 void ItlIwm::
 iwm_ampdu_txq_advance(struct iwm_softc *sc, struct iwm_tx_ring *ring, int idx)
 {
+    if (!getMainWorkLoop()->inGate()) {
+        getMainCommandGate()->runAction([](OSObject *, void *arg0, void *arg1,
+            void *arg2, void *) -> IOReturn {
+            auto sc = static_cast<struct iwm_softc *>(arg0);
+            auto that = container_of(sc, ItlIwm, com);
+            that->iwm_ampdu_txq_advance(sc, static_cast<struct iwm_tx_ring *>(arg1), static_cast<int>(reinterpret_cast<intptr_t>(arg2)));
+            return kIOReturnSuccess;
+        }, sc, ring, reinterpret_cast<void *>(static_cast<intptr_t>(idx)));
+        return;
+    }
+    /* -1 means drain: sample cur after acquiring the gate. */
+    if (idx == -1)
+        idx = ring->cur;
+    if (!iwm_txq_advance_valid(ring, idx))
+        return;
     struct iwm_tx_data *txd;
 
     while (ring->tail != idx) {
@@ -1304,6 +1350,9 @@ iwm_rx_tx_cmd_single(struct iwm_softc *sc, struct iwm_tx_resp *tx_resp,
     u8 skb_freed = 0;
     u8 lq_color;
     
+    if (!iwm_txq_advance_valid(ring, idx))
+        return;
+
     while (ring->tail != idx) {
         txd = &ring->data[ring->tail];
         struct ieee80211_tx_info *info = &txd->info;
@@ -1389,34 +1438,44 @@ iwm_rx_tx_cmd_single(struct iwm_softc *sc, struct iwm_tx_resp *tx_resp,
 void ItlIwm::
 iwm_txd_done(struct iwm_softc *sc, struct iwm_tx_data *txd)
 {
-    struct ieee80211com *ic = &sc->sc_ic;
-    
-    //    bus_dmamap_sync(sc->sc_dmat, txd->map, 0, txd->map->dm_mapsize,
-    //        BUS_DMASYNC_POSTWRITE);
-    //    bus_dmamap_unload(sc->sc_dmat, txd->map);
-    if (txd->m) {
-        mbuf_freem(txd->m);
-        txd->m = NULL;
-    }
-    
-    KASSERT(txd->in, "txd->in");
-    ieee80211_release_node(ic, &txd->in->in_ni);
+    /* Callers serialize ring ownership with the workloop gate. Detach all
+     * ownership before freeing: mbuf release may invoke an external callback. */
+    mbuf_t m = txd->m;
+    struct iwm_node *in = txd->in;
+    txd->m = NULL;
     txd->in = NULL;
     txd->totlen = 0;
     txd->txmcs = 0;
     txd->txrate = 0;
     txd->fc = 0;
     memset(&txd->info, 0, sizeof(struct ieee80211_tx_info));
+    if (m)
+        mbuf_freem(m);
+    if (in)
+        ieee80211_release_node(&sc->sc_ic, &in->in_ni);
 }
 
 void ItlIwm::
 iwm_clear_oactive(struct iwm_softc *sc, struct iwm_tx_ring *ring)
 {
+    if (!getMainWorkLoop()->inGate()) {
+        getMainCommandGate()->runAction([](OSObject *, void *arg0, void *arg1,
+            void *arg2, void *) -> IOReturn {
+            auto sc = static_cast<struct iwm_softc *>(arg0);
+            auto that = container_of(sc, ItlIwm, com);
+            that->iwm_clear_oactive(sc, static_cast<struct iwm_tx_ring *>(arg1));
+            return kIOReturnSuccess;
+        }, sc, ring);
+        return;
+    }
     struct ieee80211com *ic = &sc->sc_ic;
     struct _ifnet *ifp = &ic->ic_if;
 
     if (ring->queued < IWM_TX_RING_LOMARK) {
         sc->qfullmsk &= ~(1 << ring->qid);
+        if ((sc->sc_flags & IWM_FLAG_SHUTDOWN) ||
+            (ic->ic_state == IEEE80211_S_RUN && sc->ns_nstate != IEEE80211_S_RUN))
+            return;
         if (sc->qfullmsk == 0 && ifq_is_oactive(&ifp->if_snd)) {
             ifq_clr_oactive(&ifp->if_snd);
             (*ifp->if_start)(ifp);
@@ -1680,7 +1739,8 @@ iwm_tx(struct iwm_softc *sc, mbuf_t m, struct ieee80211_node *ni, int ac)
         if (!IEEE80211_IS_MULTICAST(wh->i_addr1) &&
             type == IEEE80211_FC0_TYPE_DATA &&
             subtype != IEEE80211_FC0_SUBTYPE_NODATA &&
-            sc->sc_tx_ba[tid].wn == in &&
+            sc->sc_tx_ba[qostid].wn == in &&
+            !(sc->agg_tid_disable & (1 << qostid)) &&
             ba->ba_state == IEEE80211_BA_AGREED) {
             qid = agg_qid;
             tid = qostid;
@@ -2563,7 +2623,7 @@ iwm_run_stop(struct iwm_softc *sc)
         err = iwm_sta_tx_agg(sc, &in->in_ni, tid, 0, 0, 0);
         if (err)
             return err;
-        iwm_ampdu_txq_advance(sc, ring, ring->cur);
+        iwm_ampdu_txq_advance(sc, ring, -1);
         iwm_clear_oactive(sc, ring);
     }
     ieee80211_ba_del(&in->in_ni);
@@ -3093,6 +3153,7 @@ iwm_newstate(struct ieee80211com *ic, enum ieee80211_state nstate, int arg)
      */
     if (sc->ns_nstate == nstate && nstate != IEEE80211_S_SCAN &&
         nstate != IEEE80211_S_AUTH)
+        return 0;
     
     if (ic->ic_state == IEEE80211_S_RUN) {
         if (nstate == IEEE80211_S_SCAN) {
@@ -3538,7 +3599,9 @@ _iwm_start_task(OSObject *target, void *arg0, void *arg1, void *arg2, void *arg3
     mbuf_t m;
     int ac = EDCA_AC_BE; /* XXX */
     
-    if (!(ifp->if_flags & IFF_RUNNING) || ifq_is_oactive(&ifp->if_snd)) {
+    if (!(ifp->if_flags & IFF_RUNNING) || ifq_is_oactive(&ifp->if_snd) ||
+        (sc->sc_flags & IWM_FLAG_SHUTDOWN) ||
+        (ic->ic_state == IEEE80211_S_RUN && sc->ns_nstate != IEEE80211_S_RUN)) {
         return kIOReturnOutputDropped;
     }
     
@@ -5132,9 +5195,13 @@ iwm_ba_task(void *arg)
             that->iwm_nic_unlock(sc);
             sc->ba_tx.start_tidmask &= ~(1 << tid);
         } else if (sc->ba_tx.stop_tidmask & (1 << tid)) {
-            sc->agg_tid_disable |= (1 << tid);
-            that->iwm_sta_tx_agg(sc, ni, tid, 0, 0, 0);
-            that->iwm_ampdu_txq_advance(sc, ring, ring->cur);
+            err = that->iwm_sta_tx_agg(sc, ni, tid, 0, 0, 0);
+            if (err) {
+                /* DMA ownership is unknown: let reset stop the hardware first. */
+                task_add(systq, &sc->init_task);
+                break;
+            }
+            that->iwm_ampdu_txq_advance(sc, ring, -1);
             that->iwm_clear_oactive(sc, ring);
             /* In DQA-mode the queue isn't removed on agg termination */
             tx_ba = &sc->sc_tx_ba[tid];

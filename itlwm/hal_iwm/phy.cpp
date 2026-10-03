@@ -738,8 +738,9 @@ iwm_cmd_done(struct iwm_softc *sc, int qid, int idx, int code)
         //        bus_dmamap_sync(sc->sc_dmat, data->map, 0,
         //            data->map->dm_mapsize, BUS_DMASYNC_POSTWRITE);
         //        bus_dmamap_unload(sc->sc_dmat, data->map);
-        mbuf_freem(data->m);
+        mbuf_t m = data->m;
         data->m = NULL;
+        mbuf_freem(m);
     }
     wakeupOn(&ring->desc[idx]);
     
