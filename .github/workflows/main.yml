@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   build:
-    name: All targets (${{ matrix.configuration }})
+    name: Tahoe (${{ matrix.configuration }})
     runs-on: macos-15-intel
     strategy:
       fail-fast: false
@@ -32,20 +32,18 @@ jobs:
           repository: acidanthera/MacKernelSDK
           ref: 3f750085caa17ec3a7880f11c11bf4f48cd6a164
           path: MacKernelSDK
-      - name: Build itlwm and every AirportItlwm target
+      - name: Build AirportItlwm for Tahoe
         env:
           CONFIGURATION: ${{ matrix.configuration }}
         run: |
           set -euo pipefail
           mkdir -p logs
-          for scheme in itlwm 'AirportItlwm (all)'; do
-            xcodebuild -project itlwm.xcodeproj -scheme "$scheme" \
-              -configuration "$CONFIGURATION" -jobs 3 ARCHS=x86_64 \
-              SYMROOT="$PWD/build/products" OBJROOT="$PWD/build/obj" \
-              CODE_SIGNING_ALLOWED=NO GIT_COMMIT="_$(git rev-parse --short HEAD)" \
-              build > "logs/$scheme.log" 2>&1 || { tail -100 "logs/$scheme.log"; exit 1; }
-          done
-      - name: Package kernel extensions
+          xcodebuild -project itlwm.xcodeproj -scheme AirportItlwm-Tahoe \
+            -configuration "$CONFIGURATION" -jobs 3 ARCHS=x86_64 \
+            SYMROOT="$PWD/build/products" OBJROOT="$PWD/build/obj" \
+            CODE_SIGNING_ALLOWED=NO GIT_COMMIT="_$(git rev-parse --short HEAD)" \
+            build > logs/AirportItlwm-Tahoe.log 2>&1 || { tail -100 logs/AirportItlwm-Tahoe.log; exit 1; }
+      - name: Package Tahoe kernel extension
         env:
           CONFIGURATION: ${{ matrix.configuration }}
         run: |
@@ -56,14 +54,11 @@ jobs:
           short_sha=$(git rev-parse --short HEAD)
           configuration=$(printf '%s' "$CONFIGURATION" | tr '[:lower:]' '[:upper:]')
           suffix="v$version-$configuration-alpha-$short_sha"
-          ditto -c -k --keepParent "$products/itlwm.kext" "artifacts/itlwm-$suffix.zip"
-          for system in 'High Sierra' Mojave Catalina 'Big Sur' Monterey Ventura Sonoma14.0 Sonoma14.4 Tahoe; do
-            ditto -c -k --keepParent "$products/$system/AirportItlwm.kext" "artifacts/AirportItlwm-${system// /_}-$suffix.zip"
-          done
+          ditto -c -k --keepParent "$products/Tahoe/AirportItlwm.kext" "artifacts/AirportItlwm-Tahoe-$suffix.zip"
       - uses: actions/upload-artifact@v4
         with:
-          name: itlwm-${{ matrix.configuration }}
-          path: artifacts/*.zip
+          name: AirportItlwm-Tahoe-${{ matrix.configuration }}
+          path: artifacts/AirportItlwm-Tahoe-*.zip
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
         if: always()
@@ -84,7 +79,7 @@ jobs:
           fetch-depth: 5
       - uses: actions/download-artifact@v4
         with:
-          pattern: itlwm-*
+          pattern: AirportItlwm-Tahoe-*
           path: artifacts
           merge-multiple: true
       - name: Publish alpha artifacts
@@ -105,7 +100,7 @@ jobs:
           else
             gh release create "$tag" --target "$GITHUB_SHA" --prerelease --title "$tag" --notes-file ReleaseNotes.md
           fi
-          gh release upload "$tag" artifacts/*.zip --clobber
+          gh release upload "$tag" artifacts/AirportItlwm-Tahoe-*.zip --clobber
 
           # Remove obsolete assets only after the replacement set has uploaded.
           gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" \
