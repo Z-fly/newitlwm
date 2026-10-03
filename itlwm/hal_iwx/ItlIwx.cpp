@@ -4062,10 +4062,12 @@ iwx_setup_he_rates(struct iwx_softc *sc)
     memset(&ic->ic_he_mcs_nss_supp, 0xff, sizeof(ic->ic_he_mcs_nss_supp));
     memset(ic->ic_ppe_thres, 0, sizeof(ic->ic_ppe_thres));
     uint8_t version = iwx_lookup_cmd_ver(sc, IWX_DATA_PATH_GROUP, IWX_STA_HE_CTXT_CMD);
+    /* Preinit builds modecaps before media_init enables HT. Requiring HTON
+     * here would omit 11ax from the initial capability table permanently.
+     * Negotiation still requires HT and QoS on the associated node. */
     if (!sc->sc_nvm.sku_cap_11ax_enable ||
         !(ic->ic_userflags & IEEE80211_F_HEON) ||
         (ic->ic_userflags & IEEE80211_F_NOVHT) ||
-        !(ic->ic_flags & IEEE80211_F_HTON) ||
         (version != 1 && version != 2))
         return;
     unsigned rx = iwx_num_of_ant(iwx_fw_valid_rx_ant(sc));
