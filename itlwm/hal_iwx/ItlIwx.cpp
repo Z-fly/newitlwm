@@ -10982,13 +10982,14 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data, struct mbuf_list *ml)
     uint32_t offset = 0, nextoff = 0, nmpdu = 0, len;
     mbuf_t m0, m;
     const size_t minsz = sizeof(pkt->len_n_flags) + sizeof(pkt->hdr);
-    int qid, idx, code, handled = 1;
+    int qid, idx, code, handled;
     
     //    bus_dmamap_sync(sc->sc_dmat, data->map, 0, IWX_RBUF_SIZE,
     //        BUS_DMASYNC_POSTREAD);
     
     m0 = data->m;
     while (m0 && offset + minsz < IWX_RBUF_SIZE) {
+        handled = 1;
         pkt = (struct iwx_rx_packet *)((uint8_t*)mbuf_data(m0) + offset);
         qid = pkt->hdr.qid;
         idx = pkt->hdr.idx;
@@ -11297,6 +11298,9 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data, struct mbuf_list *ml)
             case IWX_WIDE_ID(IWX_DATA_PATH_GROUP, IWX_RX_NO_DATA_NOTIF):
                 break; /* happens in monitor mode; ignore for now */
             case IWX_WIDE_ID(IWX_DATA_PATH_GROUP, IWX_TLC_MNG_CONFIG_CMD):
+                break;
+            case IWX_WIDE_ID(IWX_DATA_PATH_GROUP, IWX_STA_HE_CTXT_CMD):
+                /* Empty command ACK; complete the synchronous HE setup below. */
                 break;
                 
             case IWX_WIDE_ID(IWX_DATA_PATH_GROUP,
