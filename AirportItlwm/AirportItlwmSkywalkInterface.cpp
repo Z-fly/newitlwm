@@ -446,7 +446,8 @@ getPHY_MODE(struct apple80211_phymode_data *pd)
             pd->active_phy_mode = APPLE80211_MODE_11AC;
             break;
         case IEEE80211_MODE_11AX:
-            pd->active_phy_mode = APPLE80211_MODE_11AX;
+            pd->active_phy_mode = ic->ic_state == IEEE80211_S_RUN && ic->ic_bss &&
+                (ic->ic_bss->ni_flags & IEEE80211_NODE_HE) ? APPLE80211_MODE_11AX : APPLE80211_MODE_AUTO;
             break;
             
         default:
@@ -500,7 +501,7 @@ IOReturn AirportItlwmSkywalkInterface::
 getVHT_MCS_INDEX_SET(struct apple80211_vht_mcs_index_set_data *data)
 {
     struct ieee80211com *ic = fHalService->get80211Controller();
-    if (ic->ic_bss == NULL || ic->ic_curmode < IEEE80211_MODE_11AC) {
+    if (ic->ic_bss == NULL || ic->ic_curmode != IEEE80211_MODE_11AC) {
         return kIOReturnError;
     }
     memset(data, 0, sizeof(struct apple80211_vht_mcs_index_set_data));
@@ -513,7 +514,7 @@ IOReturn AirportItlwmSkywalkInterface::
 getMCS_VHT(struct apple80211_mcs_vht_data *data)
 {
     struct ieee80211com *ic = fHalService->get80211Controller();
-    if (ic->ic_bss == NULL || ic->ic_curmode < IEEE80211_MODE_11AC) {
+    if (ic->ic_bss == NULL || ic->ic_curmode != IEEE80211_MODE_11AC) {
         return kIOReturnError;
     }
     memset(data, 0, sizeof(struct apple80211_mcs_vht_data));
@@ -600,7 +601,9 @@ getRATE(struct apple80211_rate_data *rd)
         rd->version = APPLE80211_VERSION;
         rd->num_radios = 1;
         sgi = ieee80211_node_supports_sgi(ic->ic_bss);
-        if (ic->ic_curmode == IEEE80211_MODE_11AC) {
+        if (ic->ic_bss->ni_flags & IEEE80211_NODE_HE) {
+            rd->rate[0] = ic->ic_bss->ni_he_txrate_kbps / 1000;
+        } else if (ic->ic_curmode == IEEE80211_MODE_11AC) {
             if (sgi)
                 index += 1;
             nss = fHalService->getDriverInfo()->getTxNSS();

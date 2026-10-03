@@ -285,6 +285,7 @@ public:
     void    iwx_setup_ht_rates(struct iwx_softc *);
     void    iwx_setup_vht_rates(struct iwx_softc *);
     void    iwx_setup_he_rates(struct iwx_softc *);
+    int     iwx_config_he_sta(struct iwx_softc *, struct ieee80211_node *);
     int    iwx_mimo_enabled(struct iwx_softc *);
     static void    iwx_mac_ctxt_task(void *);
     static void    iwx_chan_ctxt_task(void *);

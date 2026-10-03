@@ -324,6 +324,9 @@ is5GBandSupport()
 int ItlIwx::
 getTxNSS()
 {
+    if (com.sc_ic.ic_bss && (com.sc_ic.ic_bss->ni_flags & IEEE80211_NODE_HE) &&
+        com.sc_ic.ic_bss->ni_he_tx_nss)
+        return com.sc_ic.ic_bss->ni_he_tx_nss;
     return iwx_mimo_enabled(&com) && 
     (com.sc_ic.ic_bss != NULL && com.sc_ic.ic_bss->ni_rx_nss > 1) ? 2 : 1;
 }
@@ -4054,90 +4057,51 @@ void ItlIwx::
 iwx_setup_he_rates(struct iwx_softc *sc)
 {
     struct ieee80211com *ic = &sc->sc_ic;
-    
-    /* enable 11ax support */
-//    ic->ic_flags |= IEEE80211_F_HEON;
-    
-    ic->ic_he_cap_elem = {
-        .mac_cap_info[0] =
-            IEEE80211_HE_MAC_CAP0_HTC_HE |
-            IEEE80211_HE_MAC_CAP0_TWT_REQ,
-        .mac_cap_info[1] =
-            IEEE80211_HE_MAC_CAP1_TF_MAC_PAD_DUR_16US |
-            IEEE80211_HE_MAC_CAP1_MULTI_TID_AGG_RX_QOS_8,
-        .mac_cap_info[2] =
-            IEEE80211_HE_MAC_CAP2_32BIT_BA_BITMAP,
-        .mac_cap_info[3] =
-            IEEE80211_HE_MAC_CAP3_OMI_CONTROL |
-            IEEE80211_HE_MAC_CAP3_MAX_AMPDU_LEN_EXP_VHT_2,
-        .mac_cap_info[4] =
-            IEEE80211_HE_MAC_CAP4_AMDSU_IN_AMPDU |
-            IEEE80211_HE_MAC_CAP4_MULTI_TID_AGG_TX_QOS_B39,
-        .mac_cap_info[5] =
-            IEEE80211_HE_MAC_CAP5_MULTI_TID_AGG_TX_QOS_B40 |
-            IEEE80211_HE_MAC_CAP5_MULTI_TID_AGG_TX_QOS_B41 |
-            IEEE80211_HE_MAC_CAP5_UL_2x996_TONE_RU |
-            IEEE80211_HE_MAC_CAP5_HE_DYNAMIC_SM_PS |
-            IEEE80211_HE_MAC_CAP5_HT_VHT_TRIG_FRAME_RX,
-        .phy_cap_info[1] =
-            IEEE80211_HE_PHY_CAP1_PREAMBLE_PUNC_RX_MASK |
-            IEEE80211_HE_PHY_CAP1_DEVICE_CLASS_A |
-            IEEE80211_HE_PHY_CAP1_LDPC_CODING_IN_PAYLOAD,
-        .phy_cap_info[2] =
-            IEEE80211_HE_PHY_CAP2_NDP_4x_LTF_AND_3_2US,
-        .phy_cap_info[3] =
-            IEEE80211_HE_PHY_CAP3_DCM_MAX_CONST_TX_NO_DCM |
-            IEEE80211_HE_PHY_CAP3_DCM_MAX_TX_NSS_1 |
-            IEEE80211_HE_PHY_CAP3_DCM_MAX_CONST_RX_NO_DCM |
-            IEEE80211_HE_PHY_CAP3_DCM_MAX_RX_NSS_1,
-        .phy_cap_info[4] =
-            IEEE80211_HE_PHY_CAP4_SU_BEAMFORMEE |
-            IEEE80211_HE_PHY_CAP4_BEAMFORMEE_MAX_STS_ABOVE_80MHZ_8 |
-            IEEE80211_HE_PHY_CAP4_BEAMFORMEE_MAX_STS_UNDER_80MHZ_8,
-        .phy_cap_info[5] =
-            IEEE80211_HE_PHY_CAP5_BEAMFORMEE_NUM_SND_DIM_UNDER_80MHZ_2 |
-            IEEE80211_HE_PHY_CAP5_BEAMFORMEE_NUM_SND_DIM_ABOVE_80MHZ_2,
-        .phy_cap_info[6] =
-            IEEE80211_HE_PHY_CAP6_TRIG_SU_BEAMFORMER_FB |
-            IEEE80211_HE_PHY_CAP6_TRIG_MU_BEAMFORMER_FB |
-            IEEE80211_HE_PHY_CAP6_PPE_THRESHOLD_PRESENT,
-        .phy_cap_info[7] =
-            IEEE80211_HE_PHY_CAP7_POWER_BOOST_FACTOR_AR |
-            IEEE80211_HE_PHY_CAP7_HE_SU_MU_PPDU_4XLTF_AND_08_US_GI |
-            IEEE80211_HE_PHY_CAP7_MAX_NC_1,
-        .phy_cap_info[8] =
-            IEEE80211_HE_PHY_CAP8_HE_ER_SU_PPDU_4XLTF_AND_08_US_GI |
-            IEEE80211_HE_PHY_CAP8_20MHZ_IN_40MHZ_HE_PPDU_IN_2G |
-            IEEE80211_HE_PHY_CAP8_20MHZ_IN_160MHZ_HE_PPDU |
-            IEEE80211_HE_PHY_CAP8_80MHZ_IN_160MHZ_HE_PPDU |
-            IEEE80211_HE_PHY_CAP8_DCM_MAX_RU_2x996,
-        .phy_cap_info[9] =
-            IEEE80211_HE_PHY_CAP9_NON_TRIGGERED_CQI_FEEDBACK |
-            IEEE80211_HE_PHY_CAP9_RX_FULL_BW_SU_USING_MU_WITH_COMP_SIGB |
-            IEEE80211_HE_PHY_CAP9_RX_FULL_BW_SU_USING_MU_WITH_NON_COMP_SIGB |
-            IEEE80211_HE_PHY_CAP9_NOMIMAL_PKT_PADDING_RESERVED,
-    };
-    
-    /*
-     * Set default Tx/Rx HE MCS NSS Support field.
-     * Indicate support for up to 2 spatial streams and all
-     * MCS, without any special cases
-     */
-    ic->ic_he_mcs_nss_supp = {
-        .rx_mcs_80 = htole16(0xfffa),
-        .tx_mcs_80 = htole16(0xfffa),
-        .rx_mcs_160 = htole16(0xfffa),
-        .tx_mcs_160 = htole16(0xfffa),
-        .rx_mcs_80p80 = htole16(0xffff),
-        .tx_mcs_80p80 = htole16(0xffff),
-    };
-    
-    /*
-     * Set default PPE thresholds, with PPET16 set to 0,
-     * PPET8 set to 7
-     */
-    uint8_t ppe_thres[] = {0x61, 0x1c, 0xc7, 0x71};
-    memcpy(ic->ic_ppe_thres, ppe_thres, sizeof(ic->ic_ppe_thres));
+    ic->ic_flags &= ~IEEE80211_F_HEON;
+    memset(&ic->ic_he_cap_elem, 0, sizeof(ic->ic_he_cap_elem));
+    memset(&ic->ic_he_mcs_nss_supp, 0xff, sizeof(ic->ic_he_mcs_nss_supp));
+    memset(ic->ic_ppe_thres, 0, sizeof(ic->ic_ppe_thres));
+    uint8_t version = iwx_lookup_cmd_ver(sc, IWX_DATA_PATH_GROUP, IWX_STA_HE_CTXT_CMD);
+    if (!sc->sc_nvm.sku_cap_11ax_enable ||
+        !(ic->ic_userflags & IEEE80211_F_HEON) ||
+        (ic->ic_userflags & IEEE80211_F_NOVHT) ||
+        !(ic->ic_flags & IEEE80211_F_HTON) ||
+        (version != 1 && version != 2))
+        return;
+    unsigned rx = iwx_num_of_ant(iwx_fw_valid_rx_ant(sc));
+    unsigned tx = iwx_num_of_ant(iwx_fw_valid_tx_ant(sc));
+    if (!rx || !tx)
+        return;
+    if (!iwx_mimo_enabled(sc))
+        rx = tx = 1;
+    /* Conservative station profile: no TWT, OMI, multi-TID or fragmentation. */
+    ic->ic_he_cap_elem.mac_cap_info[0] = IEEE80211_HE_MAC_CAP0_HTC_HE;
+    ic->ic_he_cap_elem.mac_cap_info[1] = IEEE80211_HE_MAC_CAP1_TF_MAC_PAD_DUR_16US;
+    ic->ic_he_cap_elem.mac_cap_info[2] = IEEE80211_HE_MAC_CAP2_32BIT_BA_BITMAP;
+    ic->ic_he_cap_elem.mac_cap_info[4] = IEEE80211_HE_MAC_CAP4_AMDSU_IN_AMPDU;
+    if (ic->ic_htcaps & IEEE80211_HTCAP_CBW20_40)
+        ic->ic_he_cap_elem.phy_cap_info[0] |= IEEE80211_HE_PHY_CAP0_CHANNEL_WIDTH_SET_40MHZ_IN_2G;
+    if (sc->sc_nvm.sku_cap_band_52GHz_enable)
+        ic->ic_he_cap_elem.phy_cap_info[0] |= IEEE80211_HE_PHY_CAP0_CHANNEL_WIDTH_SET_40MHZ_80MHZ_IN_5G;
+    ic->ic_he_cap_elem.phy_cap_info[1] = IEEE80211_HE_PHY_CAP1_DEVICE_CLASS_A |
+        IEEE80211_HE_PHY_CAP1_LDPC_CODING_IN_PAYLOAD;
+    ic->ic_he_cap_elem.phy_cap_info[2] = IEEE80211_HE_PHY_CAP2_NDP_4x_LTF_AND_3_2US;
+    ic->ic_he_cap_elem.phy_cap_info[7] = IEEE80211_HE_PHY_CAP7_HE_SU_MU_PPDU_4XLTF_AND_08_US_GI;
+    /* Require 16us padding without advertising an optional PPE field. */
+    ic->ic_he_cap_elem.phy_cap_info[9] = IEEE80211_HE_PHY_CAP9_NOMIMAL_PKT_PADDING_16US |
+        IEEE80211_HE_PHY_CAP9_RX_FULL_BW_SU_USING_MU_WITH_COMP_SIGB |
+        IEEE80211_HE_PHY_CAP9_RX_FULL_BW_SU_USING_MU_WITH_NON_COMP_SIGB;
+    ic->ic_he_mcs_nss_supp.rx_mcs_80 = htole16(rx > 1 ? 0xfffa : 0xfffe);
+    ic->ic_he_mcs_nss_supp.tx_mcs_80 = htole16(tx > 1 ? 0xfffa : 0xfffe);
+    if (sc->sc_nvm.vht160_supported) {
+        ic->ic_he_cap_elem.phy_cap_info[0] |= IEEE80211_HE_PHY_CAP0_CHANNEL_WIDTH_SET_160MHZ_IN_5G;
+        ic->ic_he_mcs_nss_supp.rx_mcs_160 = ic->ic_he_mcs_nss_supp.rx_mcs_80;
+        ic->ic_he_mcs_nss_supp.tx_mcs_160 = ic->ic_he_mcs_nss_supp.tx_mcs_80;
+    }
+    ic->ic_flags |= IEEE80211_F_HEON;
+    XYLog("Experimental HE enabled: context-v%u rx80=%04x tx80=%04x width-bits=%02x\n",
+        version, le16toh(ic->ic_he_mcs_nss_supp.rx_mcs_80),
+        le16toh(ic->ic_he_mcs_nss_supp.tx_mcs_80), ic->ic_he_cap_elem.phy_cap_info[0]);
 }
 
 #define IWX_MAX_RX_BA_SESSIONS 16
@@ -4267,6 +4231,9 @@ iwx_mac_ctxt_task(void *arg)
         return;
     }
     
+    err = that->iwx_config_he_sta(sc, &in->in_ni);
+    if (err)
+        XYLog("HE context update failed: %d\n", err);
     err = that->iwx_mac_ctxt_cmd(sc, in, IWX_FW_CTXT_ACTION_MODIFY, 1);
     if (err)
         printf("%s: failed to update MAC\n", DEVNAME(sc));
@@ -8781,10 +8748,9 @@ iwx_rs_fw_get_config_flags(struct iwx_softc *sc)
     }
     
     if (iwx_num_of_ant(iwx_fw_valid_tx_ant(sc)) > 1) {
-        if ((ni->ni_flags & IEEE80211_NODE_HE) &&
-            ni->ni_he_cap_elem.phy_cap_info[2] &
-            IEEE80211_HE_PHY_CAP2_STBC_RX_UNDER_80MHZ) {
-            flags |= IWX_TLC_MNG_CFG_FLAGS_STBC_MSK;
+        if (ni->ni_flags & IEEE80211_NODE_HE) {
+            if (ni->ni_he_cap_elem.phy_cap_info[2] & IEEE80211_HE_PHY_CAP2_STBC_RX_UNDER_80MHZ)
+                flags |= IWX_TLC_MNG_CFG_FLAGS_STBC_MSK;
         } else if (ni->ni_vhtcaps & IEEE80211_VHTCAP_RXSTBC_MASK)
             flags |= IWX_TLC_MNG_CFG_FLAGS_STBC_MSK;
         else if (ni->ni_htcaps & IEEE80211_HTCAP_RXSTBC_MASK)
@@ -8807,6 +8773,7 @@ iwx_rs_fw_get_config_flags(struct iwx_softc *sc)
         flags &= ~IWX_TLC_MNG_CFG_FLAGS_LDPC_MSK;
 
     if ((ni->ni_flags & IEEE80211_NODE_HE) &&
+        (ic->ic_he_cap_elem.phy_cap_info[3] & IEEE80211_HE_PHY_CAP3_DCM_MAX_CONST_TX_MASK) &&
         (ni->ni_he_cap_elem.phy_cap_info[3] &
          IEEE80211_HE_PHY_CAP3_DCM_MAX_CONST_RX_MASK))
         flags |= IWX_TLC_MNG_CFG_FLAGS_HE_DCM_NSS_1_MSK;
@@ -8891,46 +8858,121 @@ static uint8_t iwx_rs_fw_set_active_chains(uint8_t chains)
 
 static void
 iwx_rs_fw_he_set_enabled_rates(struct iwx_softc *sc,
-                           struct iwx_tlc_config_cmd_v4 *cmd)
+    struct iwx_tlc_config_cmd_v4 *cmd)
 {
     struct ieee80211com *ic = &sc->sc_ic;
-    uint16_t mcs_160 = le16toh(ic->ic_he_mcs_nss_supp.rx_mcs_160);
-    uint16_t mcs_80 = le16toh(ic->ic_he_mcs_nss_supp.rx_mcs_80);
-    uint16_t tx_mcs_80 =
-    le16toh(ic->ic_he_mcs_nss_supp.tx_mcs_80);
-    uint16_t tx_mcs_160 =
-    le16toh(ic->ic_he_mcs_nss_supp.tx_mcs_160);
-    int i;
-    uint8_t nss = ic->ic_bss->ni_rx_nss;
-
-    for (i = 0; i < nss && i < IWX_TLC_NSS_MAX; i++) {
-        uint16_t _mcs_160 = (mcs_160 >> (2 * i)) & 0x3;
-        uint16_t _mcs_80 = (mcs_80 >> (2 * i)) & 0x3;
-        uint16_t _tx_mcs_160 = (tx_mcs_160 >> (2 * i)) & 0x3;
-        uint16_t _tx_mcs_80 = (tx_mcs_80 >> (2 * i)) & 0x3;
-
-        /* If one side doesn't support - mark both as not supporting */
-        if (_mcs_80 == IEEE80211_HE_MCS_NOT_SUPPORTED ||
-            _tx_mcs_80 == IEEE80211_HE_MCS_NOT_SUPPORTED) {
-            _mcs_80 = IEEE80211_HE_MCS_NOT_SUPPORTED;
-            _tx_mcs_80 = IEEE80211_HE_MCS_NOT_SUPPORTED;
+    struct ieee80211_node *ni = ic->ic_bss;
+    uint16_t maps[2] = {
+        ieee80211_he_mcs_intersection(le16toh(ni->ni_he_mcs_nss_supp.rx_mcs_80),
+            le16toh(ic->ic_he_mcs_nss_supp.tx_mcs_80)),
+        ieee80211_he_mcs_intersection(le16toh(ni->ni_he_mcs_nss_supp.rx_mcs_160),
+            le16toh(ic->ic_he_mcs_nss_supp.tx_mcs_160))
+    };
+    if (ni->ni_chw != IEEE80211_CHAN_WIDTH_160)
+        maps[IWX_TLC_MCS_PER_BW_160] = 0xffff;
+    bool ldpc = ni->ni_he_cap_elem.phy_cap_info[1] & IEEE80211_HE_PHY_CAP1_LDPC_CODING_IN_PAYLOAD;
+    for (unsigned ss = 0; ss < IWX_TLC_NSS_MAX; ss++) {
+        for (unsigned bw = 0; bw < 2; bw++) {
+            uint16_t mask = ss < ni->ni_rx_nss ?
+                rs_fw_he_ieee80211_mcs_to_rs_mcs((maps[bw] >> (2 * ss)) & 3) : 0;
+            if (!ldpc)
+                mask &= 0x03ff; /* HE MCS10/11 requires LDPC. */
+            cmd->ht_rates[ss][bw] = htole16(mask);
         }
-        if (_mcs_80 > _tx_mcs_80)
-            _mcs_80 = _tx_mcs_80;
-        cmd->ht_rates[i][IWX_TLC_MCS_PER_BW_80] =
-            htole16(rs_fw_he_ieee80211_mcs_to_rs_mcs(_mcs_80));
-
-        /* If one side doesn't support - mark both as not supporting */
-        if (_mcs_160 == IEEE80211_HE_MCS_NOT_SUPPORTED ||
-            _tx_mcs_160 == IEEE80211_HE_MCS_NOT_SUPPORTED) {
-            _mcs_160 = IEEE80211_HE_MCS_NOT_SUPPORTED;
-            _tx_mcs_160 = IEEE80211_HE_MCS_NOT_SUPPORTED;
-        }
-        if (_mcs_160 > _tx_mcs_160)
-            _mcs_160 = _tx_mcs_160;
-        cmd->ht_rates[i][IWX_TLC_MCS_PER_BW_160] =
-        htole16(rs_fw_he_ieee80211_mcs_to_rs_mcs(_mcs_160));
     }
+}
+
+static uint8_t
+iwx_he_ppe_value(const uint8_t *ppe, unsigned bit)
+{
+    unsigned value = ppe[bit / 8] >> (bit % 8);
+    if (bit % 8 > 5)
+        value |= unsigned(ppe[bit / 8 + 1]) << (8 - bit % 8);
+    return value & 7;
+}
+
+static void
+iwx_build_he_sta(const struct ieee80211_node *ni, struct iwx_he_sta_context_cmd *cmd)
+{
+    memset(cmd, 0, sizeof(*cmd));
+    cmd->sta_id = IWX_STATION_ID;
+    cmd->tid_limit = 1; /* single TID aggregation */
+    uint32_t flags = IWX_HE_NIC_NOT_ACK_ENABLED;
+    uint32_t op = ni->ni_he_oper_params;
+    cmd->bss_color = (op >> 24) & 0x3f;
+    if (op & IEEE80211_HE_OPERATION_BSS_COLOR_DISABLED)
+        flags |= IWX_HE_BSS_COLOR_DIS;
+    if (op & IEEE80211_HE_OPERATION_PARTIAL_BSS_COLOR)
+        flags |= IWX_HE_PARTIAL_BSS_COLOR;
+    cmd->htc_trig_based_pkt_ext = op & 7;
+    cmd->frame_time_rts_th = htole16((op >> 4) & 0x3ff);
+    const uint8_t *mac = ni->ni_he_cap_elem.mac_cap_info;
+    uint32_t htc = (mac[0] & IEEE80211_HE_MAC_CAP0_HTC_HE) ? 1 : 0;
+    if (mac[2] & IEEE80211_HE_MAC_CAP2_BSR) htc |= 1U << 4;
+    if (mac[3] & IEEE80211_HE_MAC_CAP3_OMI_CONTROL) htc |= 1U << 5;
+    if (mac[4] & IEEE80211_HE_MAC_CAP4_BQR) htc |= 1U << 6;
+    cmd->htc_flags = htole32(htc);
+    if (mac[2] & IEEE80211_HE_MAC_CAP2_32BIT_BA_BITMAP) flags |= IWX_HE_32BIT_BA_BITMAP;
+    if (mac[2] & IEEE80211_HE_MAC_CAP2_ACK_EN) flags |= IWX_HE_ACK_ENABLED;
+    memset(cmd->pkt_ext, 7, sizeof(cmd->pkt_ext));
+    if (ni->ni_he_cap_elem.phy_cap_info[6] & IEEE80211_HE_PHY_CAP6_PPE_THRESHOLD_PRESENT) {
+        unsigned nss = (ni->ni_ppe_thres[0] & 7) + 1;
+        unsigned mask = (ni->ni_ppe_thres[0] >> 3) & 15;
+        unsigned bit = 7;
+        for (unsigned ss = 0; ss < nss && ss < 2; ss++) {
+            for (unsigned bw = 0; bw < 4; bw++) {
+                if (!(mask & (1U << bw))) continue;
+                cmd->pkt_ext[ss][bw][1] = iwx_he_ppe_value(ni->ni_ppe_thres, bit);
+                cmd->pkt_ext[ss][bw][0] = iwx_he_ppe_value(ni->ni_ppe_thres, bit + 3);
+                bit += 6;
+            }
+        }
+        flags |= IWX_HE_PACKET_EXT;
+    } else {
+        unsigned padding = (ni->ni_he_cap_elem.phy_cap_info[9] >> 6) & 3;
+        if (padding != 3) {
+            for (unsigned ss = 0; ss < 2; ss++)
+                for (unsigned bw = 0; bw < 4; bw++) {
+                    cmd->pkt_ext[ss][bw][0] = padding == 1 ? 0 : 7;
+                    cmd->pkt_ext[ss][bw][1] = padding == 2 ? 0 : 7;
+                }
+            flags |= IWX_HE_PACKET_EXT;
+        }
+    }
+    if (ni->ni_flags & IEEE80211_NODE_HE_MU_EDCA) {
+        flags |= IWX_HE_MU_EDCA_CW;
+        for (unsigned ac = 0; ac < 4; ac++) {
+            const uint8_t *rec = ni->ni_he_mu_edca + 1 + 3 * ac;
+            unsigned fw_ac = iwx_mvm_mac80211_ac_to_ucode_ac((enum ieee80211_edca_ac)ac);
+            cmd->trig_based_txf[fw_ac].cwmin = htole16(rec[1] & 15);
+            cmd->trig_based_txf[fw_ac].cwmax = htole16(rec[1] >> 4);
+            cmd->trig_based_txf[fw_ac].aifsn = htole16(rec[0] & 15);
+            cmd->trig_based_txf[fw_ac].mu_time = htole16(rec[2]);
+        }
+    }
+    cmd->flags = htole32(flags);
+}
+
+int ItlIwx::
+iwx_config_he_sta(struct iwx_softc *sc, struct ieee80211_node *ni)
+{
+    if (!(ni->ni_flags & IEEE80211_NODE_HE))
+        return 0;
+    if ((ni->ni_flags & (IEEE80211_NODE_HECAP | IEEE80211_NODE_HEOP)) !=
+        (IEEE80211_NODE_HECAP | IEEE80211_NODE_HEOP))
+        return EINVAL;
+    struct iwx_he_sta_context_cmd cmd;
+    static_assert(sizeof(cmd) == 88, "HE context v2 ABI");
+    static_assert(__offsetof(struct iwx_he_sta_context_cmd, max_bssid_indicator) == 80, "HE context v1 ABI");
+    uint8_t ver = iwx_lookup_cmd_ver(sc, IWX_DATA_PATH_GROUP, IWX_STA_HE_CTXT_CMD);
+    if (ver != 1 && ver != 2)
+        return EOPNOTSUPP;
+    iwx_build_he_sta(ni, &cmd);
+    int err = iwx_send_cmd_pdu(sc, iwx_cmd_id(IWX_STA_HE_CTXT_CMD, IWX_DATA_PATH_GROUP, 0),
+        0, ver == 1 ? 80 : sizeof(cmd), &cmd);
+    XYLog("HE context: version=%u color=%u flags=%08x result=%d\n",
+        ver, cmd.bss_color, le32toh(cmd.flags), err);
+    return err;
 }
 
 int ItlIwx::
@@ -8967,6 +9009,11 @@ iwx_rs_init(struct iwx_softc *sc, struct iwx_node *in, bool update)
     } else
         cfg_cmd.mode = IWX_TLC_MNG_MODE_NON_HT;
 
+    if (ni->ni_flags & IEEE80211_NODE_HE)
+        XYLog("HE TLC: mode=%u width=%s nss=%u rates80=%04x/%04x rates160=%04x/%04x\n",
+            cfg_cmd.mode, ieee80211_chan_width_name[ni->ni_chw], ni->ni_rx_nss,
+            le16toh(cfg_cmd.ht_rates[0][0]), le16toh(cfg_cmd.ht_rates[1][0]),
+            le16toh(cfg_cmd.ht_rates[0][1]), le16toh(cfg_cmd.ht_rates[1][1]));
     cfg_cmd.sta_id = IWX_STATION_ID;
     cfg_cmd.max_ch_width = update ? iwx_rs_fw_bw_from_sta_bw(ni->ni_chw) : IWX_RATE_MCS_CHAN_WIDTH_20;
     cfg_cmd.chains = iwx_rs_fw_set_active_chains(iwx_fw_valid_tx_ant(sc));
@@ -9054,8 +9101,8 @@ static uint32_t iwx_new_rate_from_v1(uint32_t rate_v1)
             uint32_t he_gi_ltf = (rate_v1 & IWX_RATE_MCS_HE_GI_LTF_MSK_V1) >>
             IWX_RATE_MCS_HE_GI_LTF_POS;
             
-            if ((he_type_bits == IWX_RATE_MCS_HE_TYPE_SU ||
-                 he_type_bits == IWX_RATE_MCS_HE_TYPE_EXT_SU) &&
+            if ((he_type_bits == IWX_RATE_MCS_HE_TYPE_SU_V1 ||
+                 he_type_bits == IWX_RATE_MCS_HE_TYPE_EXT_SU_V1) &&
                 he_gi_ltf == IWX_RATE_MCS_HE_SU_4_LTF)
             /* the new rate have an additional bit to
              * represent the value 4 rather then using SGI
@@ -9103,6 +9150,31 @@ static uint32_t iwx_new_rate_from_v1(uint32_t rate_v1)
     return rate_v2;
 }
 
+/* HE SU bitrate from firmware-selected MCS/NSS/BW/GI, in kbit/s.
+ * MU/TB needs an RU allocation absent from TLC notifications: report unknown. */
+static uint32_t
+iwx_he_rate_kbps(uint32_t rate)
+{
+    if ((rate & IWX_RATE_MCS_MOD_TYPE_MSK) != IWX_RATE_MCS_HE_MSK)
+        return 0;
+    unsigned type = (rate & IWX_RATE_MCS_HE_TYPE_MSK) >> IWX_RATE_MCS_HE_TYPE_POS;
+    unsigned bw = (rate & IWX_RATE_MCS_CHAN_WIDTH_MSK) >> IWX_RATE_MCS_CHAN_WIDTH_POS;
+    unsigned mcs = rate & IWX_RATE_MCS_CODE_MSK;
+    unsigned gi = (rate & IWX_RATE_MCS_HE_GI_LTF_MSK) >> IWX_RATE_MCS_HE_GI_LTF_POS;
+    unsigned nss = ((rate & IWX_RATE_MCS_NSS_MSK) >> IWX_RATE_MCS_NSS_POS) + 1;
+    if (type > 1 || bw > 3 || mcs > 11 || gi > 4)
+        return 0;
+    static const unsigned tones[] = {234, 468, 980, 1960};
+    static const unsigned bits[] = {1, 2, 2, 4, 4, 6, 6, 6, 8, 8, 10, 10};
+    static const unsigned num[] = {1, 1, 3, 1, 3, 2, 3, 5, 3, 5, 3, 5};
+    static const unsigned den[] = {2, 2, 4, 2, 4, 3, 4, 6, 4, 6, 4, 6};
+    unsigned symbol = 128 + (gi == 2 ? 16 : gi == 3 ? 32 : 8);
+    unsigned nsd = (rate & IWX_RATE_MCS_HE_106T_MSK) ? 102 : tones[bw];
+    unsigned divisor = den[mcs] * symbol;
+    if (rate & IWX_RATE_HE_DUAL_CARRIER_MODE_MSK) divisor *= 2;
+    return nsd * nss * bits[mcs] * num[mcs] * 10000 / divisor;
+}
+
 void ItlIwx::
 iwx_rs_update(struct iwx_softc *sc, struct iwx_tlc_update_notif *notif)
 {
@@ -9131,6 +9203,9 @@ iwx_rs_update(struct iwx_softc *sc, struct iwx_tlc_update_notif *notif)
     }
     XYLog("%s new rate: %s\n", __FUNCTION__, pretty_rate);
     format = rate_n_flags & IWX_RATE_MCS_MOD_TYPE_MSK;
+    ni->ni_he_txrate_kbps = iwx_he_rate_kbps(rate_n_flags);
+    ni->ni_he_tx_nss = format == IWX_RATE_MCS_HE_MSK ?
+        ((rate_n_flags & IWX_RATE_MCS_NSS_MSK) >> IWX_RATE_MCS_NSS_POS) + 1 : 0;
     if (format == IWX_RATE_MCS_VHT_MSK ||
         format == IWX_RATE_MCS_HE_MSK ||
         format == IWX_RATE_MCS_EHT_MSK) {
@@ -9481,6 +9556,9 @@ iwx_run(struct iwx_softc *sc)
         return err;
     }
     
+    err = iwx_config_he_sta(sc, &in->in_ni);
+    if (err)
+        return err;
     err = iwx_rs_init(sc, in, true);
     if (err) {
         XYLog("%s: could not update rate scaling (error %d)\n",

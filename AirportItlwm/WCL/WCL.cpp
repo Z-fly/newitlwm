@@ -778,8 +778,17 @@ IOReturn AirportItlwmSkywalkInterface::copyWCLExtendedBss(void *data)
     if (ic->ic_bss->ni_flags & IEEE80211_NODE_VHT)
         vht.mcs_map = ic->ic_bss->ni_vht_mcsinfo.tx_mcs_map;
     memcpy(bytes + 0xcc, &vht, sizeof(vht));
-    // HE and MLO extensions are not supplied by this interface.
-    bytes[0xd8] = bytes[0xd9] = bytes[0xda] = bytes[0xdb] = 0xff;
+    // Native updateMCSSet uses version + a 16-bit HE MCS/NSS map (8 bytes).
+    uint32_t heVersion = APPLE80211_VERSION;
+    uint16_t heMap = 0xffff;
+    if (ic->ic_bss->ni_flags & IEEE80211_NODE_HE) {
+        bool wide = ic->ic_bss->ni_chw == IEEE80211_CHAN_WIDTH_160;
+        heMap = htole16(ieee80211_he_mcs_intersection(
+            le16toh(wide ? ic->ic_he_mcs_nss_supp.rx_mcs_160 : ic->ic_he_mcs_nss_supp.rx_mcs_80),
+            le16toh(wide ? ic->ic_bss->ni_he_mcs_nss_supp.tx_mcs_160 : ic->ic_bss->ni_he_mcs_nss_supp.tx_mcs_80)));
+    }
+    memcpy(bytes + 0xd4, &heVersion, sizeof(heVersion));
+    memcpy(bytes + 0xd8, &heMap, sizeof(heMap));
     if (ic->ic_flags & IEEE80211_F_RSNON)
         ieee80211_add_rsn(bytes + 0x113, ic, ic->ic_bss);
     return kIOReturnSuccess;

@@ -326,6 +326,12 @@ bool AirportItlwm::start(IOService *provider)
     if (PE_parse_boot_argn("-noht40", &boot_value, sizeof(boot_value)))
         fHalService->get80211Controller()->ic_userflags |= IEEE80211_F_NOHT40;
 
+#ifdef AIRPORT_WCL
+    int he_enabled = 0;
+    if (PE_parse_boot_argn("itlwm_he", &he_enabled, sizeof(he_enabled)) && he_enabled == 1)
+        fHalService->get80211Controller()->ic_userflags |= IEEE80211_F_HEON;
+#endif
+
     if (!fHalService->attach(pciNub)) {
         XYLog("attach fail\n");
         super::stop(pciNub);
