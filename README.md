@@ -10,6 +10,23 @@ We highly recommend exploring our documentation before using this Kernel Extensi
 - [Compatibility](https://openintelwireless.github.io/itlwm/Compat)
 - [FAQ](https://openintelwireless.github.io/itlwm/FAQ)
 
+## AirportItlwm on macOS Sequoia
+
+The `AirportItlwm-Sequoia` target supports macOS Sequoia 15.2 and later on x86_64
+through the native Wi-Fi interface. It has been tested on macOS 15.8 (24H23).
+Sequoia and Tahoe use separate ABI headers and build products.
+
+With the same MacKernelSDK checkout described below:
+
+```sh
+xcodebuild -project itlwm.xcodeproj -scheme AirportItlwm-Sequoia \
+  -configuration Release ARCHS=x86_64 CODE_SIGNING_ALLOWED=NO build
+```
+
+Use this kext only on Darwin 24.2.0–24.99.99. Keep the Tahoe kext restricted to
+Darwin 25.x when both systems share an OpenCore configuration. HE remains opt-in
+with `itlwm_he=1`, and the Tahoe feature limitations below also apply to Sequoia.
+
 ## AirportItlwm on macOS 26
 
 This fork supports macOS Tahoe 26.x (x86_64) through the native Wi-Fi interface,
@@ -22,8 +39,8 @@ including scanning, connecting, network switching, and private Wi-Fi addresses.
 - Device support follows the upstream hardware table; Tahoe compatibility still
   requires validation on each adapter.
 
-Download Tahoe **Release** or **Debug** builds from [this fork's Releases](https://github.com/laobamac/itlwm/releases).
-CI builds only Tahoe and updates the alpha release after checks pass on `main`.
+Download Sequoia or Tahoe **Release** and **Debug** builds from [this fork's Releases](https://github.com/laobamac/itlwm/releases).
+CI builds both systems and updates the alpha release after all builds pass on `main`.
 
 To build locally, install Xcode and Python 3, and check out MacKernelSDK commit
 `3f750085caa17ec3a7880f11c11bf4f48cd6a164` in `MacKernelSDK/`:
