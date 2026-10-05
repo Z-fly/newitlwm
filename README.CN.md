@@ -12,9 +12,7 @@
 
 ## macOS Sequoia上的AirportItlwm
 
-`AirportItlwm-Sequoia` 构建目标支持在x86_64架构的macOS Sequoia 15.2及更高版本上
-使用系统原生Wi-Fi界面。已在macOS 15.8（24H23）上进行测试。
-Sequoia和Tahoe使用各自独立的ABI头文件和构建产物。
+`AirportItlwm-Sequoia` 构建目标支持在x86_64架构的macOS Sequoia 15.2及更高版本使用系统原生Wi-Fi界面。已在macOS 15.8（24H23）进行测试。Sequoia和Tahoe使用各自独立的ABI头文件和构建产物。
 
 使用下文所述相同版本的MacKernelSDK源码进行构建：
 
