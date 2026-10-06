@@ -1,5 +1,6 @@
 [中文](README.CN.md)
 
+[![Version](https://img.shields.io/github/v/tag/laobamac/itlwm?style=flat&label=Downloads)](https://github.com/laobamac/itlwm/releases)
 # itlwm
 
 **An Intel Wi-Fi Adapter Kernel Extension for macOS, based on the OpenBSD Project.**
@@ -31,6 +32,9 @@ with `itlwm_he=1`, and the Tahoe feature limitations below also apply to Sequoia
 
 ## AirportItlwm on macOS 26
 
+
+
+
 This fork supports macOS Tahoe 26.x (x86_64) through the native Wi-Fi interface,
 including scanning, connecting, network switching, and private Wi-Fi addresses.
 
@@ -52,17 +56,13 @@ xcodebuild -project itlwm.xcodeproj -scheme AirportItlwm-Tahoe \
   -configuration Release ARCHS=x86_64 CODE_SIGNING_ALLOWED=NO build
 ```
 
-## Download
-
-[![Download](https://img.shields.io/github/v/release/laobamac/itlwm?include_prereleases&label=Download)](https://github.com/laobamac/itlwm/releases)
-
 ## Questions and Issues
 
 Check out our [FAQ Page](https://openintelwireless.github.io/itlwm/FAQ) for more info.
 
 If you have other questions or feedback, feel free to [![Join the chat at https://gitter.im/OpenIntelWireless/itlwm](https://badges.gitter.im/OpenIntelWireless/itlwm.svg)](https://gitter.im/OpenIntelWireless/itlwm?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge&utm_content=badge).
 
-We only accept bug reports in GitHub Issues.
+We only accept bug reports in GitHub Issues, before opening an issue, you're recommended to reconfirm it with us on [Gitter](https://gitter.im/OpenIntelWireless/itlwm); once it's confirmed, please use the provided issue template.
 
 ## Credits
 
